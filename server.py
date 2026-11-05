@@ -293,10 +293,7 @@ async def _analyze_upload(
                 pose_not_found = False
             else:
                 state = counter.mark_no_pose(elapsed_time=elapsed_time)
-                if session_state["session_id"] is not None:
-                    fall_state = _pose_not_found_fall_state()
-                else:
-                    fall_state = fall_detector.update_no_pose()
+                fall_state = fall_detector.update_no_pose()
                 pose_not_found = True
 
             fall_event = fall_state.get("fall_event", {})
@@ -458,7 +455,10 @@ def _update_fall_tracking_locked(session_state: dict, fall_state: dict) -> dict:
 
     if session_state["session_id"] is not None:
         fall_frame_counter += 1
-        if fall_state["fall_detected"]:
+        if (
+            fall_state["fall_detected"]
+            and fall_state["fall_metrics"]["reliable_upper_body_visible"]
+        ):
             consecutive_fall_count += 1
         else:
             consecutive_fall_count = 0
@@ -529,20 +529,6 @@ def _log_fall_frame(result: dict) -> None:
         f"consecutive_fall_count={result.get('consecutive_fall_count')} "
         f"stale={result.get('stale')}"
     )
-
-
-def _pose_not_found_fall_state() -> dict:
-    return {
-        "fall_detected": False,
-        "fall_status": "NORMAL",
-        "fall_confidence": 0.0,
-        "fall_metrics": {},
-        "fall_event": {
-            "new_event": False,
-            "event_id": None,
-            "evidence_image": None,
-        },
-    }
 
 
 def _image_shape_from_bytes(image_bytes: bytes) -> list[int] | None:
