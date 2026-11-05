@@ -26,7 +26,7 @@ firebase_admin.initialize_app(
     cred,
     {
         "databaseURL":
-        "https://mobile-robot-2-default-rtdb.firebaseio.com/"
+        "https://mobile-robot-2-56458-default-rtdb.firebaseio.com/"
     }
 )
 

@@ -8,3 +8,14 @@ firebase_key.json
 firebase-key.json
 firebase-adminsdk*.json
 temi1/
+
+# VS Code history
+.history/
+
+# Python virtual environment
+temi/
+
+# Android Studio
+.gradle/
+**/build/
+local.properties
