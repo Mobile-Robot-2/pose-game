@@ -45,6 +45,7 @@ class FallDetector:
         self.last_event = None
         self._new_event = False
         self.center_history = deque()
+        self.upright_seen = False
         self.last_metrics = self._empty_metrics()
         return self.get_state()
 
@@ -70,33 +71,34 @@ class FallDetector:
             and metrics["upper_body_horizontal"]
             and metrics["upper_body_low"]
         )
-        fall_evidence = fallen_pose or (
-            metrics["head_shoulders_visible"]
+        # 먼저 서 있거나 상체를 세운 자세를 확인해야 낙상 감지를 활성화한다.
+        if (
+            metrics["reliable_upper_body_visible"]
+            and not metrics["horizontal"]
+            and not metrics["upper_body_horizontal"]
+            and not metrics["low_position"]
+        ):
+            self.upright_seen = True
+            
+        fall_evidence = (
+            self.upright_seen
             and metrics["sudden_drop"]
-            and (metrics["horizontal"] or metrics["upper_body_horizontal"])
-        ) or obvious_lying_pose
+            and (
+                fallen_pose
+                or obvious_lying_pose
+            )
+        )
 
         if fall_evidence:
             self.last_evidence_time = now
 
         if self.status == "NORMAL":
-            if obvious_lying_pose:
-                self.status = "FALL_CONFIRMED"
-                self.suspected_since = now
-                self.recovery_since = None
-                self._create_event()
-            elif fall_evidence:
+            if fall_evidence:
                 self.status = "FALL_SUSPECTED"
                 self.suspected_since = now
-
+                
         elif self.status == "FALL_SUSPECTED":
-            if obvious_lying_pose:
-                self.status = "FALL_CONFIRMED"
-                self.recovery_since = None
-                self._create_event()
-            elif fallen_pose:
-                if self.suspected_since is None:
-                    self.suspected_since = now
+            if fall_evidence:
                 if now - self.suspected_since >= FALL_CONFIRM_SECONDS:
                     self.status = "FALL_CONFIRMED"
                     self.recovery_since = None
