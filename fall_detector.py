@@ -50,6 +50,7 @@ class FallDetector:
         return self.get_state()
 
     def update(self, landmarks) -> dict:
+        previous_status = self.status
         now = time.monotonic()
         metrics = self._calculate_metrics(landmarks, now)
         self.last_metrics = metrics
@@ -80,29 +81,34 @@ class FallDetector:
         ):
             self.upright_seen = True
             
-        fall_evidence = (
+        lying_pose = fallen_pose or obvious_lying_pose
+
+        # 급격한 하강은 낙상 의심을 시작할 때만 확인한다.
+        fall_trigger = (
             self.upright_seen
             and metrics["sudden_drop"]
-            and (
-                fallen_pose
-                or obvious_lying_pose
-            )
+            and lying_pose
         )
 
-        if fall_evidence:
-            self.last_evidence_time = now
-
         if self.status == "NORMAL":
-            if fall_evidence:
+            if fall_trigger:
                 self.status = "FALL_SUSPECTED"
                 self.suspected_since = now
-                
+                self.last_evidence_time = now
+
         elif self.status == "FALL_SUSPECTED":
-            if fall_evidence:
-                if now - self.suspected_since >= FALL_CONFIRM_SECONDS:
+            # 의심 상태에서는 누운 자세가 유지되는지 확인한다.
+            if lying_pose:
+                self.last_evidence_time = now
+
+                if (
+                    self.suspected_since is not None
+                    and now - self.suspected_since >= FALL_CONFIRM_SECONDS
+                ):
                     self.status = "FALL_CONFIRMED"
                     self.recovery_since = None
                     self._create_event()
+
             elif now - self.last_evidence_time > EVIDENCE_GRACE_SECONDS:
                 self.status = "NORMAL"
                 self.suspected_since = None
@@ -126,9 +132,10 @@ class FallDetector:
                 self.recovery_since = None
 
         elif self.status == "RECOVERED":
-            if fall_evidence:
+            if fall_trigger:
                 self.status = "FALL_SUSPECTED"
                 self.suspected_since = now
+                self.last_evidence_time = now
                 self.recovered_since = None
             elif (
                 self.recovered_since is not None
@@ -136,7 +143,17 @@ class FallDetector:
             ):
                 self.status = "NORMAL"
                 self.recovered_since = None
-
+                
+        if self.status != previous_status:
+            print(
+                f"fall_state_transition: {previous_status} -> {self.status}, "
+                f"upright_seen={self.upright_seen}, "
+                f"sudden_drop={metrics['sudden_drop']}, "
+                f"fall_trigger={fall_trigger}, "
+                f"lying_pose={lying_pose}",
+                flush=True,
+            )
+            
         return self.get_state()
 
     def update_no_pose(self) -> dict:
