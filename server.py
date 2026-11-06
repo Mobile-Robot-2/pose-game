@@ -26,9 +26,25 @@ firebase_admin.initialize_app(
     cred,
     {
         "databaseURL":
-        "https://mobile-robot-2-default-rtdb.firebaseio.com/"
+        "https://mobile-robot-2-56458-default-rtdb.firebaseio.com/"
     }
 )
+
+def _publish_game_state(result: dict) -> None:
+    """게임 상태를 Firebase에 기록. 실패해도 낙상/분석 응답은 막지 않는다."""
+    firebase_data = {
+        "timestamp": time.time(),
+        "counts": result["counts"],
+        "elapsed_time": result["elapsed_time"],
+        "game_clear": result["game_clear"],
+        "fall_detected": result["fall_detected"],
+    }
+    try:
+        db.reference("game/current").set(firebase_data)
+        db.reference("game/history").push(firebase_data)
+    except Exception as exc:
+        print(f"[firebase] game state publish failed (ignored): {exc!r}")
+
 
 app = FastAPI(title="Pose Rhythm Game API")
 BASE_DIR = Path(__file__).resolve().parent
@@ -216,15 +232,7 @@ async def analyze(
         )
     result = await _analyze_upload(upload, elapsed_time)
 
-    firebase_data = {
-        "timestamp": time.time(),
-        "counts": result["counts"],
-        "elapsed_time": result["elapsed_time"],
-        "game_clear": result["game_clear"],
-        "fall_detected": result["fall_detected"]
-    }
-    db.reference("game/current").set(firebase_data)
-    db.reference("game/history").push(firebase_data)
+    _publish_game_state(result)
 
     return result
 
@@ -247,15 +255,7 @@ async def analyze_frame(
         _log_fall_frame(result)
         return result
 
-    firebase_data = {
-        "timestamp": time.time(),
-        "counts": result["counts"],
-        "elapsed_time": result["elapsed_time"],
-        "game_clear": result["game_clear"],
-        "fall_detected": result["fall_detected"]
-    }
-    db.reference("game/current").set(firebase_data)
-    db.reference("game/history").push(firebase_data)
+    _publish_game_state(result)
 
     _log_fall_frame(result)
     return result
@@ -517,10 +517,13 @@ def _stale_analyze_response(session_state: dict, elapsed_time: float | None) -> 
 
 
 def _log_fall_frame(result: dict) -> None:
+    metrics = result.get("fall_metrics") or {}
     print(
         "fall_frame "
         f"session_id={result.get('session_id')} "
         f"location={result.get('location')} "
+        f"pose_not_found={result.get('pose_not_found')} "
+        f"buffer_filled={metrics.get('buffer_filled')}/{metrics.get('window')} "
         f"fall_detected={result.get('fall_detected')} "
         f"fall_status={result.get('fall_status')} "
         f"confidence={result.get('confidence', result.get('fall_confidence'))} "
