@@ -24,9 +24,12 @@ MAX_OBSERVATION_GAP_SECONDS = 0.75
 # jitter instead of accumulating gradual descent across two intervals.
 DROP_WINDOW_SECONDS = 0.75
 MIN_CENTER_DROP = 0.12
+MIN_HEAD_DROP = 0.20
+MIN_SHOULDER_DROP = 0.15
 HORIZONTAL_ANGLE_DEGREES = 45.0
 STRONG_HORIZONTAL_ANGLE_DEGREES = 75.0
 UPPER_BODY_HORIZONTAL_ANGLE_DEGREES = 50.0
+UPPER_BODY_LOW_HOLD_ANGLE_DEGREES = 40.0
 LOW_HEAD_Y = 0.36
 LOW_HIP_Y = 0.55
 LOW_SHOULDER_Y = 0.42
@@ -50,6 +53,7 @@ class FallDetector:
         self.last_event = None
         self._new_event = False
         self.upright_center_history = deque()
+        self.upright_head_shoulder_history = deque()
         self.last_observation_time = None
         self.last_metrics = self._empty_metrics()
         return self.get_state()
@@ -77,6 +81,11 @@ class FallDetector:
         self.last_metrics = metrics
         self._new_event = False
 
+        in_frame = all(
+            0 <= landmarks[index].x <= 1 and 0 <= landmarks[index].y <= 1
+            for index in (NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP)
+        )
+        head_shoulder_drop = self._head_shoulders_dropped(landmarks, now, upright_pose, in_frame)
         strong_horizontal = (
             metrics["torso_angle"] >= STRONG_HORIZONTAL_ANGLE_DEGREES
         )
@@ -94,10 +103,19 @@ class FallDetector:
             and metrics["upper_body_low"]
         )
         low_fall_pose = fallen_pose or obvious_lying_pose
-        fall_motion = (
+        if self.status == "FALL_SUSPECTED":
+            low_fall_pose = low_fall_pose or (
+                metrics["upper_body_low"]
+                and (
+                    metrics["upper_body_angle"] >= UPPER_BODY_LOW_HOLD_ANGLE_DEGREES
+                    or (in_frame and metrics["body_center_y"] >= BODY_CENTER_LOW_Y)
+                )
+            )
+        angle_fall_motion = (
             metrics["sudden_drop"]
             and (metrics["horizontal"] or metrics["upper_body_horizontal"])
         )
+        fall_motion = angle_fall_motion or head_shoulder_drop
         if diagnostics is not None:
             diagnostics.update(
                 upright_pose=upright_pose,
@@ -107,6 +125,8 @@ class FallDetector:
                 ),
                 low_fall_pose=low_fall_pose,
                 fall_motion=fall_motion,
+                angle_fall_motion=angle_fall_motion,
+                head_shoulder_drop=head_shoulder_drop,
             )
 
         if self.status in ("NORMAL", "RECOVERED"):
@@ -170,15 +190,38 @@ class FallDetector:
         previous = diagnostics.get("observation_reset_reason")
         diagnostics["observation_reset_reason"] = f"{previous};{reason}" if previous else reason
         diagnostics["upright_history_count"] = 0
-        diagnostics.update(upright_pose=False, low_fall_pose=False, fall_motion=False)
+        diagnostics.update(
+            upright_pose=False, low_fall_pose=False, fall_motion=False,
+            angle_fall_motion=False, head_shoulder_drop=False,
+        )
 
     def _break_observation(self) -> None:
         self.upright_center_history.clear()
+        self.upright_head_shoulder_history.clear()
         self.last_observation_time = None
         self.low_pose_since = None
         self.recovery_since = None
         if self.status == "FALL_SUSPECTED":
             self.status = "NORMAL"
+
+    def _head_shoulders_dropped(self, landmarks, now, upright_pose, in_frame) -> bool:
+        history = self.upright_head_shoulder_history
+        if not in_frame:
+            history.clear()
+            return False
+        while history and now - history[0][0] > DROP_WINDOW_SECONDS:
+            history.popleft()
+
+        nose_y = landmarks[NOSE].y
+        shoulder_y = (landmarks[LEFT_SHOULDER].y + landmarks[RIGHT_SHOULDER].y) / 2
+        if upright_pose:
+            history.append((now, nose_y, shoulder_y))
+            return False
+        return any(
+            nose_y - previous_nose >= MIN_HEAD_DROP
+            and shoulder_y - previous_shoulder >= MIN_SHOULDER_DROP
+            for _, previous_nose, previous_shoulder in history
+        )
 
     def get_state(self) -> dict:
         return {
