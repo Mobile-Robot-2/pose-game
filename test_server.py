@@ -23,22 +23,27 @@ def analyze(mode, session_id, image_bytes):
             session = {"id": session_id, "analyzer": PoseAnalyzer(), "fall": FallDetector()}
             sessions[mode] = session
         result = session["analyzer"].analyze_image_bytes(image_bytes)
+        landmarks = [
+            {"x": point.x, "y": point.y, "visibility": getattr(point, "visibility", None)}
+            for point in (result["landmarks"] or [])
+        ]
         if mode == "fall":
             if not result["detected"]:
                 if session["fall"].status == "FALL_SUSPECTED":
                     session["fall"].reset()
                 session["fall"].update_no_pose()
-                return {"detected": False, "fall_status": "UNKNOWN", "fall_metrics": {}}
+                return {"detected": False, "fall_status": "UNKNOWN", "fall_metrics": {}, "landmarks": landmarks}
             state = session["fall"].update(result["landmarks"])
             if not state["fall_metrics"]["head_shoulders_visible"]:
                 if session["fall"].status == "FALL_SUSPECTED":
                     session["fall"].reset()
-                return {"detected": False, "fall_status": "UNKNOWN", "fall_metrics": state["fall_metrics"]}
+                return {"detected": False, "fall_status": "UNKNOWN", "fall_metrics": state["fall_metrics"], "landmarks": landmarks}
             return {"detected": True, "fall_status": state["fall_status"],
-                    "fall_detected": state["fall_detected"], "fall_metrics": state["fall_metrics"]}
+                    "fall_detected": state["fall_detected"], "fall_metrics": state["fall_metrics"],
+                    "landmarks": landmarks}
         actions = [name for name, detected in result["detections"].items() if detected]
         return {"detected": result["detected"], "current_actions": actions,
-                "detected_action": actions[0] if len(actions) == 1 else None}
+                "detected_action": actions[0] if len(actions) == 1 else None, "landmarks": landmarks}
 
 
 async def analyze_upload(mode, image, session_id):

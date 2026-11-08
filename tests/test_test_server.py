@@ -43,6 +43,18 @@ class TestSessions(unittest.TestCase):
         with self.assertRaises(ValueError):
             test_server.analyze("fall", "one", b"")
 
+    @patch.object(test_server, "PoseAnalyzer", FakeAnalyzer)
+    def test_landmarks_are_returned_and_empty_when_pose_is_lost(self):
+        point = types.SimpleNamespace(x=0.2, y=0.4, visibility=0.8)
+        with patch.object(FakeAnalyzer, "analyze_image_bytes", return_value={
+                "detected": True, "landmarks": [point], "detections": {}}):
+            result = test_server.analyze("rhythm", "one", b"image")
+            self.assertEqual(result["landmarks"], [{"x": 0.2, "y": 0.4, "visibility": 0.8}])
+        with patch.object(FakeAnalyzer, "analyze_image_bytes", return_value={
+                "detected": False, "landmarks": None, "detections": {}}):
+            result = test_server.analyze("rhythm", "one", b"image")
+            self.assertEqual(result["landmarks"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
