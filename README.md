@@ -83,3 +83,27 @@ python -m uvicorn server:app --host 0.0.0.0 --port 8000
 기존 서버는 실행 시 프로젝트 루트의 `firebase-key.json`을 읽으며 Firebase에 접근합니다. 이 파일은 비밀 키이므로 공유하거나 Git에 올리지 마세요. 기존 서버와 테스트 서버는 같은 포트에서 동시에 실행할 수 없습니다.
 
 테스트 화면의 동작과 제한은 [TESTING.md](TESTING.md)를 참고하세요.
+
+## 저장한 영상 분석
+
+Temi 등으로 촬영한 영상 한 개를 노트북에서 분석할 수 있습니다. 예를 들어 `data/videos` 폴더를 만들고 그 안에 영상을 저장하세요. 이 폴더와 분석 결과가 저장되는 `data` 폴더는 Git에 올라가지 않습니다. 다른 위치의 영상도 경로를 직접 지정해 분석할 수 있습니다.
+
+VS Code의 Command Prompt 터미널에서 `pose-game` 폴더를 열고 가상환경을 활성화한 뒤 실행합니다. 영상 파일명은 실제 이름으로 바꾸세요.
+
+```cmd
+.venv\Scripts\activate.bat
+python analyze_video.py fall "data\videos\fall.mp4"
+python analyze_video.py rhythm "data\videos\rhythm.mp4"
+```
+
+`fall`은 낙상 감지, `rhythm`은 리듬게임 동작 분석입니다. 명령 한 번에 한 영상씩 분석하며 기존 서버나 Firebase를 실행하지 않습니다. 낙상 영상은 동작 전 서 있는 모습과 넘어진 후 유지되는 모습을 모두 포함해야 합니다.
+
+결과는 `data/video_analysis`의 새로운 CSV 파일에 저장되고 실행이 끝나면 파일 경로가 표시됩니다. CSV에는 분석한 프레임의 영상 시각과 판정이 기록됩니다. 낙상은 인식 불가일 때 `UNKNOWN`을 기록하며, 리듬게임은 여러 동작이 동시에 감지되면 후보를 모두 기록하고 최종 판정은 비워 둡니다. 실험의 정확도를 구하려면 별도로 기록한 정답과 비교해야 합니다.
+
+기본 분석 간격은 영상 시간 기준 최소 0.2초입니다. 필요하면 간격이나 저장 경로를 지정할 수 있습니다.
+
+```cmd
+python analyze_video.py fall "data\videos\fall.mp4" --interval 0.5 --output "data\video_analysis\fall_result.csv"
+```
+
+기존 결과 파일은 덮어쓰지 않습니다. 영상 프레임 번호와 FPS로 영상 시각을 계산하므로 **고정 프레임 속도 영상**을 사용하세요. 가변 프레임 속도 영상은 고정 프레임 속도로 변환한 뒤 분석해야 정확한 시간 비교가 가능합니다. 오프라인 결과는 Temi의 실제 네트워크 지연이나 프레임 누락을 재현하지 않습니다.

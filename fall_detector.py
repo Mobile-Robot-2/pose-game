@@ -54,8 +54,8 @@ class FallDetector:
         self.last_metrics = self._empty_metrics()
         return self.get_state()
 
-    def update(self, landmarks, *, diagnostics: dict | None = None) -> dict:
-        now = time.monotonic()
+    def update(self, landmarks, *, diagnostics: dict | None = None, timestamp: float | None = None) -> dict:
+        now = time.monotonic() if timestamp is None else timestamp
         if diagnostics is not None and self.last_observation_time is not None:
             diagnostics["observation_gap_ms"] = (now - self.last_observation_time) * 1000
         if (
