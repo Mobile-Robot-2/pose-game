@@ -7,7 +7,7 @@ import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-from action_counter import ACTION_NAMES, detect_actions
+from action_counter import ACTION_NAMES, ClapDetector, detect_actions
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -35,6 +35,7 @@ class PoseAnalyzer:
         self.landmarker = vision.PoseLandmarker.create_from_options(options)
         self.start_time = time.time()
         self.last_timestamp_ms = -1
+        self.clap_detector = ClapDetector()
 
     def analyze_image_bytes(self, image_bytes: bytes, *, diagnostics: dict | None = None,
                             timestamp_ms: int | None = None) -> dict:
@@ -55,6 +56,7 @@ class PoseAnalyzer:
         if diagnostics is not None:
             diagnostics["inference_ms"] = (time.perf_counter() - inference_start) * 1000
         if not result.pose_landmarks:
+            self.clap_detector.update(None, timestamp_ms / 1000)
             return {
                 "detected": False,
                 "detections": {action: False for action in ACTION_NAMES},
@@ -62,11 +64,18 @@ class PoseAnalyzer:
             }
 
         landmarks = result.pose_landmarks[0]
+        detections = detect_actions(landmarks)
+        detections["CLAP"] = self.clap_detector.update(landmarks, timestamp_ms / 1000)
+        if detections["CLAP"]:
+            detections = {action: action == "CLAP" for action in ACTION_NAMES}
         return {
             "detected": True,
-            "detections": detect_actions(landmarks),
+            "detections": detections,
             "landmarks": landmarks,
         }
+
+    def reset_actions(self) -> None:
+        self.clap_detector.reset()
 
     def close(self) -> None:
         self.landmarker.close()

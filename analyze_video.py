@@ -92,14 +92,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze a saved video using the pose test algorithms.")
     parser.add_argument("mode", choices=("fall", "rhythm"))
     parser.add_argument("video", type=Path, help="Path to a constant-frame-rate video")
-    parser.add_argument("--interval", type=float, default=0.2, help="Minimum sampling interval in seconds (default: 0.2)")
+    parser.add_argument("--interval", type=float, help="Minimum sampling interval in seconds (fall: 0.2, rhythm: 0.1)")
     parser.add_argument("--output", type=Path, help="CSV output path; existing files are not overwritten")
     args = parser.parse_args()
     output = args.output or Path("data/video_analysis") / (
         f"{args.video.stem}_{args.mode}_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}.csv"
     )
     try:
-        count = analyze_video(args.video, args.mode, output, args.interval)
+        interval = args.interval if args.interval is not None else (0.1 if args.mode == "rhythm" else 0.2)
+        count = analyze_video(args.video, args.mode, output, interval)
     except (ValueError, OSError, RuntimeError) as exc:
         parser.exit(1, f"Analysis failed: {exc}\n")
     print(f"Analyzed frames: {count}\nResult CSV: {output.resolve()}")

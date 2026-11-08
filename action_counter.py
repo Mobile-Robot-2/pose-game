@@ -128,6 +128,42 @@ def detect_actions(landmarks) -> dict[str, bool]:
     }
 
 
+class ClapDetector:
+    """Emit one event when the visible hands move close together."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.contact = False
+        self.last_seen = None
+
+    def update(self, landmarks, timestamp: float) -> bool:
+        if (not landmarks or len(landmarks) <= RIGHT_WRIST
+                or not _visibility_ok(landmarks, (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_WRIST, RIGHT_WRIST))):
+            if self.last_seen is not None and timestamp - self.last_seen > 1.0:
+                self.reset()
+            return False
+
+        left, right = landmarks[LEFT_WRIST], landmarks[RIGHT_WRIST]
+        if not all(0 <= point.x <= 1 and 0 <= point.y <= 1 for point in (left, right)):
+            if self.last_seen is not None and timestamp - self.last_seen > 1.0:
+                self.reset()
+            return False
+
+        if self.last_seen is not None and (timestamp <= self.last_seen or timestamp - self.last_seen > 1.0):
+            self.reset()
+        self.last_seen = timestamp
+
+        distance = math.hypot(left.x - right.x, left.y - right.y) / _shoulder_width(landmarks)
+        if distance >= 0.9:
+            self.contact = False
+        elif not self.contact and is_clap(landmarks):
+            self.contact = True
+            return True
+        return False
+
+
 class ActionCounter:
     def __init__(self) -> None:
         self.reset()
