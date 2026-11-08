@@ -61,8 +61,8 @@ class FallDetector:
         self.last_metrics = self._empty_metrics()
         return self.get_state()
 
-    def update(self, landmarks, *, diagnostics: dict | None = None) -> dict:
-        now = time.monotonic()
+    def update(self, landmarks, *, diagnostics: dict | None = None, timestamp: float | None = None) -> dict:
+        now = time.monotonic() if timestamp is None else timestamp
         observation_gap = (
             now - self.last_observation_time if self.last_observation_time is not None else 0.0
         )
@@ -82,7 +82,7 @@ class FallDetector:
         if not metrics["reliable_upper_body_visible"]:
             if diagnostics is not None:
                 self._record_reset(diagnostics, "low_landmark_visibility")
-            return self.update_no_pose(allow_grace=False)
+            return self.update_no_pose(allow_grace=False, timestamp=now)
 
         self.last_observation_time = now
         self.last_metrics = metrics
@@ -197,14 +197,16 @@ class FallDetector:
         return self.get_state()
 
     def update_no_pose(
-        self, *, diagnostics: dict | None = None, allow_grace: bool = True
+        self, *, diagnostics: dict | None = None, allow_grace: bool = True,
+        timestamp: float | None = None,
     ) -> dict:
+        now = time.monotonic() if timestamp is None else timestamp
         if (
             allow_grace
             and self.status == "FALL_SUSPECTED"
             and not self.missing_pose_pending
             and self.last_observation_time is not None
-            and time.monotonic() - self.last_observation_time <= SUSPECTED_MISSING_FRAME_GRACE_SECONDS
+            and now - self.last_observation_time <= SUSPECTED_MISSING_FRAME_GRACE_SECONDS
         ):
             self.missing_pose_pending = True
             self.upright_center_history.clear()

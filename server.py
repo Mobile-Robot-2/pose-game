@@ -623,6 +623,8 @@ def reset() -> dict:
 
     with processing_lock:
         state = counter.reset()
+        if analyzer is not None:
+            analyzer.reset_actions()
         fall_state = _reset_fall_tracking_locked()
     game_start_time = time.time()
     print(f"게임 시작: {game_start_time}")
