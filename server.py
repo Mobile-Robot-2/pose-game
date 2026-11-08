@@ -1,3 +1,6 @@
+from contextlib import nullcontext
+import logging
+import os
 from pathlib import Path
 from threading import Lock
 
@@ -9,6 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from action_counter import ActionCounter
+from fall_debug import FallDebugRecorder
 from fall_detector import FallDetector
 from medication_store import MedicationLogRequest, MedicationStore
 from pose_analyzer import MODEL_PATH, PoseAnalyzer
@@ -54,6 +58,7 @@ fall_detector = FallDetector()
 robot_manager = RobotManager()
 medication_store = MedicationStore(MEDICATION_LOG_PATH)
 analyzer: PoseAnalyzer | None = None
+fall_debug: FallDebugRecorder | None = None
 startup_error: str | None = None
 processing_lock = Lock()
 current_fall_session_id: str | None = None
@@ -71,17 +76,27 @@ def root() -> dict:
 
 @app.on_event("startup")
 def startup() -> None:
-    global analyzer, startup_error
+    global analyzer, startup_error, fall_debug
     try:
         analyzer = PoseAnalyzer()
         startup_error = None
     except FileNotFoundError as exc:
         analyzer = None
         startup_error = str(exc)
+    debug_mode = os.environ.get("FALL_DEBUG", "").strip().lower()
+    if debug_mode in {"csv", "frames"}:
+        try:
+            fall_debug = FallDebugRecorder(DATA_DIR / "fall_debug", save_frames=debug_mode == "frames")
+        except OSError:
+            logging.getLogger(__name__).exception("Could not start fall diagnostics")
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
+    global fall_debug
+    if fall_debug is not None:
+        fall_debug.close()
+        fall_debug = None
     if analyzer is not None:
         analyzer.close()
 
@@ -214,19 +229,20 @@ async def analyze(
             status_code=400,
             detail="Missing image file. Use multipart field name 'image' or 'file'.",
         )
-    result = await _analyze_upload(upload, elapsed_time)
+    with (fall_debug.capture("/analyze") if fall_debug else nullcontext()) as diagnostics:
+        result = await _analyze_upload(upload, elapsed_time, diagnostics=diagnostics)
 
-    firebase_data = {
-        "timestamp": time.time(),
-        "counts": result["counts"],
-        "elapsed_time": result["elapsed_time"],
-        "game_clear": result["game_clear"],
-        "fall_detected": result["fall_detected"]
-    }
-    db.reference("game/current").set(firebase_data)
-    db.reference("game/history").push(firebase_data)
+        firebase_data = {
+            "timestamp": time.time(),
+            "counts": result["counts"],
+            "elapsed_time": result["elapsed_time"],
+            "game_clear": result["game_clear"],
+            "fall_detected": result["fall_detected"]
+        }
+        db.reference("game/current").set(firebase_data)
+        db.reference("game/history").push(firebase_data)
 
-    return result
+        return result
 
 
 @app.post("/analyze_frame")
@@ -236,29 +252,31 @@ async def analyze_frame(
     session_id: str | None = Form(None),
     location: str | None = Form(None),
 ) -> dict:
-    result = await _analyze_upload(
-        image,
-        elapsed_time=elapsed_time,
-        session_id=session_id,
-        location=location,
-    )
+    with (fall_debug.capture("/analyze_frame", session_id) if fall_debug else nullcontext()) as diagnostics:
+        result = await _analyze_upload(
+            image,
+            elapsed_time=elapsed_time,
+            session_id=session_id,
+            location=location,
+            diagnostics=diagnostics,
+        )
 
-    if result.get("stale"):
+        if result.get("stale"):
+            _log_fall_frame(result)
+            return result
+
+        firebase_data = {
+            "timestamp": time.time(),
+            "counts": result["counts"],
+            "elapsed_time": result["elapsed_time"],
+            "game_clear": result["game_clear"],
+            "fall_detected": result["fall_detected"]
+        }
+        db.reference("game/current").set(firebase_data)
+        db.reference("game/history").push(firebase_data)
+
         _log_fall_frame(result)
         return result
-
-    firebase_data = {
-        "timestamp": time.time(),
-        "counts": result["counts"],
-        "elapsed_time": result["elapsed_time"],
-        "game_clear": result["game_clear"],
-        "fall_detected": result["fall_detected"]
-    }
-    db.reference("game/current").set(firebase_data)
-    db.reference("game/history").push(firebase_data)
-
-    _log_fall_frame(result)
-    return result
 
 
 async def _analyze_upload(
@@ -266,6 +284,8 @@ async def _analyze_upload(
     elapsed_time: float | None = None,
     session_id: str | None = None,
     location: str | None = None,
+    *,
+    diagnostics: dict | None = None,
 ) -> dict:
     if analyzer is None:
         raise HTTPException(
@@ -279,25 +299,44 @@ async def _analyze_upload(
     image_bytes = await upload.read()
     if not image_bytes:
         raise HTTPException(status_code=400, detail="Empty image file.")
+    if diagnostics is not None and diagnostics["save_frames"]:
+        diagnostics["image_bytes"] = image_bytes
 
     try:
         with processing_lock:
+            previous_session = current_fall_session_id
             session_state = _prepare_fall_session_locked(session_id, location)
             if session_state["stale"]:
-                return _stale_analyze_response(session_state, elapsed_time)
+                result = _stale_analyze_response(session_state, elapsed_time)
+                if diagnostics is not None:
+                    diagnostics.update(
+                        processing_error="stale_frame_ignored",
+                        fall_status=result["fall_status"],
+                        fall_detected=result["fall_detected"],
+                    )
+                return result
 
-            analysis = analyzer.analyze_image_bytes(image_bytes)
+            if diagnostics is not None and previous_session != current_fall_session_id:
+                diagnostics["observation_reset_reason"] = "new_session"
+            analysis = analyzer.analyze_image_bytes(image_bytes, diagnostics=diagnostics)
             if analysis["detected"]:
                 state = counter.update(analysis["detections"], elapsed_time=elapsed_time)
-                fall_state = fall_detector.update(analysis["landmarks"])
+                fall_state = fall_detector.update(analysis["landmarks"], diagnostics=diagnostics)
                 pose_not_found = False
             else:
                 state = counter.mark_no_pose(elapsed_time=elapsed_time)
-                if session_state["session_id"] is not None:
-                    fall_state = _pose_not_found_fall_state()
-                else:
-                    fall_state = fall_detector.update_no_pose()
+                fall_state = fall_detector.update_no_pose(diagnostics=diagnostics)
                 pose_not_found = True
+
+            if diagnostics is not None:
+                if fall_state["fall_metrics"]["reliable_upper_body_visible"]:
+                    diagnostics.update(fall_state["fall_metrics"])
+                diagnostics.update(
+                    pose_detected=analysis["detected"],
+                    landmarks=analysis["landmarks"],
+                    fall_status=fall_state["fall_status"],
+                    fall_detected=fall_state["fall_detected"],
+                )
 
             fall_event = fall_state.get("fall_event", {})
             if fall_event.get("new_event"):
@@ -458,7 +497,10 @@ def _update_fall_tracking_locked(session_state: dict, fall_state: dict) -> dict:
 
     if session_state["session_id"] is not None:
         fall_frame_counter += 1
-        if fall_state["fall_detected"]:
+        if (
+            fall_state["fall_detected"]
+            and fall_state["fall_metrics"]["reliable_upper_body_visible"]
+        ):
             consecutive_fall_count += 1
         else:
             consecutive_fall_count = 0
@@ -529,20 +571,6 @@ def _log_fall_frame(result: dict) -> None:
         f"consecutive_fall_count={result.get('consecutive_fall_count')} "
         f"stale={result.get('stale')}"
     )
-
-
-def _pose_not_found_fall_state() -> dict:
-    return {
-        "fall_detected": False,
-        "fall_status": "NORMAL",
-        "fall_confidence": 0.0,
-        "fall_metrics": {},
-        "fall_event": {
-            "new_event": False,
-            "event_id": None,
-            "evidence_image": None,
-        },
-    }
 
 
 def _image_shape_from_bytes(image_bytes: bytes) -> list[int] | None:

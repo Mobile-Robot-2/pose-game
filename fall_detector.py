@@ -16,8 +16,13 @@ FALL_CONFIRM_SECONDS = 0.8
 RECOVERY_CONFIRM_SECONDS = 1.5
 RECOVERED_DISPLAY_SECONDS = 2.0
 EVIDENCE_GRACE_SECONDS = 0.6
+# Temi sends at least 0.5 s apart. Allow 0.25 s of jitter without bridging
+# a missed frame at that cadence or confirming from a single interval.
+MAX_OBSERVATION_GAP_SECONDS = 0.75
 
-DROP_WINDOW_SECONDS = 1.0
+# At the nominal 0.5 s cadence, require the drop within one interval plus
+# jitter instead of accumulating gradual descent across two intervals.
+DROP_WINDOW_SECONDS = 0.75
 MIN_CENTER_DROP = 0.12
 HORIZONTAL_ANGLE_DEGREES = 45.0
 STRONG_HORIZONTAL_ANGLE_DEGREES = 75.0
@@ -38,19 +43,37 @@ class FallDetector:
 
     def reset(self) -> dict:
         self.status = "NORMAL"
-        self.suspected_since = None
+        self.low_pose_since = None
         self.recovery_since = None
         self.recovered_since = None
         self.last_evidence_time = 0.0
         self.last_event = None
         self._new_event = False
-        self.center_history = deque()
+        self.upright_center_history = deque()
+        self.last_observation_time = None
         self.last_metrics = self._empty_metrics()
         return self.get_state()
 
-    def update(self, landmarks) -> dict:
+    def update(self, landmarks, *, diagnostics: dict | None = None) -> dict:
         now = time.monotonic()
-        metrics = self._calculate_metrics(landmarks, now)
+        if diagnostics is not None and self.last_observation_time is not None:
+            diagnostics["observation_gap_ms"] = (now - self.last_observation_time) * 1000
+        if (
+            self.last_observation_time is not None
+            and now - self.last_observation_time > MAX_OBSERVATION_GAP_SECONDS
+        ):
+            self._break_observation()
+            if diagnostics is not None:
+                self._record_reset(diagnostics, "observation_gap")
+
+        history_size = len(self.upright_center_history) if diagnostics is not None else 0
+        metrics, upright_pose = self._calculate_metrics(landmarks, now)
+        if not metrics["reliable_upper_body_visible"]:
+            if diagnostics is not None:
+                self._record_reset(diagnostics, "low_landmark_visibility")
+            return self.update_no_pose()
+
+        self.last_observation_time = now
         self.last_metrics = metrics
         self._new_event = False
 
@@ -70,63 +93,27 @@ class FallDetector:
             and metrics["upper_body_horizontal"]
             and metrics["upper_body_low"]
         )
-        fall_evidence = fallen_pose or (
-            metrics["head_shoulders_visible"]
-            and metrics["sudden_drop"]
+        low_fall_pose = fallen_pose or obvious_lying_pose
+        fall_motion = (
+            metrics["sudden_drop"]
             and (metrics["horizontal"] or metrics["upper_body_horizontal"])
-        ) or obvious_lying_pose
-
-        if fall_evidence:
-            self.last_evidence_time = now
-
-        if self.status == "NORMAL":
-            if obvious_lying_pose:
-                self.status = "FALL_CONFIRMED"
-                self.suspected_since = now
-                self.recovery_since = None
-                self._create_event()
-            elif fall_evidence:
-                self.status = "FALL_SUSPECTED"
-                self.suspected_since = now
-
-        elif self.status == "FALL_SUSPECTED":
-            if obvious_lying_pose:
-                self.status = "FALL_CONFIRMED"
-                self.recovery_since = None
-                self._create_event()
-            elif fallen_pose:
-                if self.suspected_since is None:
-                    self.suspected_since = now
-                if now - self.suspected_since >= FALL_CONFIRM_SECONDS:
-                    self.status = "FALL_CONFIRMED"
-                    self.recovery_since = None
-                    self._create_event()
-            elif now - self.last_evidence_time > EVIDENCE_GRACE_SECONDS:
-                self.status = "NORMAL"
-                self.suspected_since = None
-
-        elif self.status == "FALL_CONFIRMED":
-            recovered_pose = (
-                not metrics["horizontal"]
-                and not metrics["upper_body_horizontal"]
-                and not metrics["low_position"]
+        )
+        if diagnostics is not None:
+            diagnostics.update(
+                upright_pose=upright_pose,
+                upright_history_count=len(self.upright_center_history),
+                upright_samples_expired=(
+                    history_size + int(upright_pose) - len(self.upright_center_history)
+                ),
+                low_fall_pose=low_fall_pose,
+                fall_motion=fall_motion,
             )
-            if recovered_pose:
-                if self.recovery_since is None:
-                    self.recovery_since = now
-                elif now - self.recovery_since >= RECOVERY_CONFIRM_SECONDS:
-                    self.status = "RECOVERED"
-                    self.recovered_since = now
-                    self.suspected_since = None
-                    if self.last_event is not None:
-                        self.last_event["status"] = "CLOSED"
-            else:
-                self.recovery_since = None
 
-        elif self.status == "RECOVERED":
-            if fall_evidence:
+        if self.status in ("NORMAL", "RECOVERED"):
+            if fall_motion:
                 self.status = "FALL_SUSPECTED"
-                self.suspected_since = now
+                self.last_evidence_time = now
+                self.low_pose_since = now if low_fall_pose else None
                 self.recovered_since = None
             elif (
                 self.recovered_since is not None
@@ -135,11 +122,63 @@ class FallDetector:
                 self.status = "NORMAL"
                 self.recovered_since = None
 
+        elif self.status == "FALL_SUSPECTED":
+            if fall_motion or low_fall_pose:
+                self.last_evidence_time = now
+            if low_fall_pose:
+                if self.low_pose_since is None:
+                    self.low_pose_since = now
+                elif now - self.low_pose_since >= FALL_CONFIRM_SECONDS:
+                    self.status = "FALL_CONFIRMED"
+                    self.recovery_since = None
+                    self._create_event()
+            else:
+                self.low_pose_since = None
+                if upright_pose or now - self.last_evidence_time > EVIDENCE_GRACE_SECONDS:
+                    self.status = "NORMAL"
+
+        elif self.status == "FALL_CONFIRMED":
+            if upright_pose:
+                if self.recovery_since is None:
+                    self.recovery_since = now
+                elif now - self.recovery_since >= RECOVERY_CONFIRM_SECONDS:
+                    self.status = "RECOVERED"
+                    self.recovered_since = now
+                    if self.last_event is not None:
+                        self.last_event["status"] = "CLOSED"
+            else:
+                self.recovery_since = None
+
+        if diagnostics is not None:
+            diagnostics["low_pose_ms"] = (
+                (now - self.low_pose_since) * 1000
+                if low_fall_pose and self.low_pose_since is not None
+                else None
+            )
         return self.get_state()
 
-    def update_no_pose(self) -> dict:
+    def update_no_pose(self, *, diagnostics: dict | None = None) -> dict:
+        if diagnostics is not None:
+            self._record_reset(diagnostics, "pose_not_detected")
+        self._break_observation()
         self.last_metrics = self._empty_metrics()
+        self._new_event = False
         return self.get_state()
+
+    @staticmethod
+    def _record_reset(diagnostics: dict, reason: str) -> None:
+        previous = diagnostics.get("observation_reset_reason")
+        diagnostics["observation_reset_reason"] = f"{previous};{reason}" if previous else reason
+        diagnostics["upright_history_count"] = 0
+        diagnostics.update(upright_pose=False, low_fall_pose=False, fall_motion=False)
+
+    def _break_observation(self) -> None:
+        self.upright_center_history.clear()
+        self.last_observation_time = None
+        self.low_pose_since = None
+        self.recovery_since = None
+        if self.status == "FALL_SUSPECTED":
+            self.status = "NORMAL"
 
     def get_state(self) -> dict:
         return {
@@ -173,7 +212,7 @@ class FallDetector:
         }
         self._new_event = True
 
-    def _calculate_metrics(self, landmarks, now: float) -> dict:
+    def _calculate_metrics(self, landmarks, now: float) -> tuple[dict, bool]:
         nose = landmarks[NOSE]
         left_shoulder = landmarks[LEFT_SHOULDER]
         right_shoulder = landmarks[RIGHT_SHOULDER]
@@ -190,8 +229,7 @@ class FallDetector:
         )
         hips_visible = self._is_visible(left_hip) and self._is_visible(right_hip)
         if not (upper_body_visible and hips_visible):
-            self.center_history.clear()
-            return self._empty_metrics()
+            return self._empty_metrics(), False
 
         shoulder_x = (left_shoulder.x + right_shoulder.x) / 2
         shoulder_y = (left_shoulder.y + right_shoulder.y) / 2
@@ -233,12 +271,26 @@ class FallDetector:
             and shoulder_y >= LOW_SHOULDER_Y
         )
 
-        self.center_history.append((now, body_center_y))
-        while self.center_history and now - self.center_history[0][0] > DROP_WINDOW_SECONDS:
-            self.center_history.popleft()
+        # A standing person's hips can be below LOW_HIP_Y in the camera view.
+        # Require both upper-body landmarks to be high and vertically ordered.
+        upright_pose = (
+            reliable_upper_body_visible
+            and not horizontal
+            and not upper_body_horizontal
+            and nose.y < LOW_HEAD_Y
+            and shoulder_y < LOW_SHOULDER_Y
+            and nose.y < shoulder_y < hip_y
+        )
+        if upright_pose:
+            self.upright_center_history.append((now, body_center_y))
+        while (
+            self.upright_center_history
+            and now - self.upright_center_history[0][0] > DROP_WINDOW_SECONDS
+        ):
+            self.upright_center_history.popleft()
 
         previous_center_y = min(
-            (center_y for _, center_y in self.center_history),
+            (center_y for _, center_y in self.upright_center_history),
             default=body_center_y,
         )
         center_drop = max(0.0, body_center_y - previous_center_y)
@@ -260,7 +312,7 @@ class FallDetector:
             "low_position": low_position,
             "sudden_drop": sudden_drop,
             "rapid_drop": sudden_drop,
-        }
+        }, upright_pose
 
     def _confidence(self) -> float:
         score = 0.0
