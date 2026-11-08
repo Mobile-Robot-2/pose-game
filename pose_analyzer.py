@@ -36,12 +36,18 @@ class PoseAnalyzer:
         self.start_time = time.time()
         self.last_timestamp_ms = -1
 
-    def analyze_image_bytes(self, image_bytes: bytes) -> dict:
+    def analyze_image_bytes(self, image_bytes: bytes, *, diagnostics: dict | None = None) -> dict:
         bgr_image = self._decode_image(image_bytes)
         rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
 
-        result = self.landmarker.detect_for_video(mp_image, self._next_timestamp_ms())
+        timestamp_ms = self._next_timestamp_ms()
+        if diagnostics is not None:
+            diagnostics["height"], diagnostics["width"] = bgr_image.shape[:2]
+            inference_start = time.perf_counter()
+        result = self.landmarker.detect_for_video(mp_image, timestamp_ms)
+        if diagnostics is not None:
+            diagnostics["inference_ms"] = (time.perf_counter() - inference_start) * 1000
         if not result.pose_landmarks:
             return {
                 "detected": False,
