@@ -30,7 +30,7 @@ CONNECTIONS = (
 )
 FIELDS = (
     "frame_id", "timestamp", "endpoint", "session_id", "frame_interval_ms",
-    "observation_gap_ms", "inference_ms", "handler_ms", "width", "height",
+    "observation_gap_ms", "pose_gap_grace", "inference_ms", "handler_ms", "width", "height",
     "pose_detected", "nose_y", "shoulder_y", "hip_y", "body_center_y",
     "torso_angle", "upper_body_angle", "upright_pose", "upright_history_count",
     "upright_samples_expired", "center_drop", "sudden_drop", "horizontal",

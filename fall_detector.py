@@ -19,10 +19,12 @@ EVIDENCE_GRACE_SECONDS = 0.6
 # Temi sends at least 0.5 s apart. Allow 0.25 s of jitter without bridging
 # a missed frame at that cadence or confirming from a single interval.
 MAX_OBSERVATION_GAP_SECONDS = 0.75
+SUSPECTED_MISSING_FRAME_GRACE_SECONDS = 1.0
 
 # At the nominal 0.5 s cadence, require the drop within one interval plus
 # jitter instead of accumulating gradual descent across two intervals.
 DROP_WINDOW_SECONDS = 0.75
+HEAD_SHOULDER_DROP_WINDOW_SECONDS = 0.85
 MIN_CENTER_DROP = 0.12
 MIN_HEAD_DROP = 0.20
 MIN_SHOULDER_DROP = 0.15
@@ -55,17 +57,22 @@ class FallDetector:
         self.upright_center_history = deque()
         self.upright_head_shoulder_history = deque()
         self.last_observation_time = None
+        self.missing_pose_pending = False
         self.last_metrics = self._empty_metrics()
         return self.get_state()
 
     def update(self, landmarks, *, diagnostics: dict | None = None) -> dict:
         now = time.monotonic()
+        observation_gap = (
+            now - self.last_observation_time if self.last_observation_time is not None else 0.0
+        )
         if diagnostics is not None and self.last_observation_time is not None:
-            diagnostics["observation_gap_ms"] = (now - self.last_observation_time) * 1000
-        if (
-            self.last_observation_time is not None
-            and now - self.last_observation_time > MAX_OBSERVATION_GAP_SECONDS
-        ):
+            diagnostics["observation_gap_ms"] = observation_gap * 1000
+        max_gap = (
+            SUSPECTED_MISSING_FRAME_GRACE_SECONDS
+            if self.missing_pose_pending else MAX_OBSERVATION_GAP_SECONDS
+        )
+        if observation_gap > max_gap:
             self._break_observation()
             if diagnostics is not None:
                 self._record_reset(diagnostics, "observation_gap")
@@ -75,7 +82,7 @@ class FallDetector:
         if not metrics["reliable_upper_body_visible"]:
             if diagnostics is not None:
                 self._record_reset(diagnostics, "low_landmark_visibility")
-            return self.update_no_pose()
+            return self.update_no_pose(allow_grace=False)
 
         self.last_observation_time = now
         self.last_metrics = metrics
@@ -111,6 +118,18 @@ class FallDetector:
                     or (in_frame and metrics["body_center_y"] >= BODY_CENTER_LOW_Y)
                 )
             )
+        if self.missing_pose_pending:
+            self.missing_pose_pending = False
+            resumed = in_frame and low_fall_pose and not upright_pose
+            if resumed:
+                # Neither end of the unobserved interval adds time to the hold.
+                if self.low_pose_since is not None:
+                    self.low_pose_since += observation_gap
+            else:
+                self.status = "NORMAL"
+                self.low_pose_since = None
+            if diagnostics is not None:
+                diagnostics["pose_gap_grace"] = "resumed" if resumed else "rejected"
         angle_fall_motion = (
             metrics["sudden_drop"]
             and (metrics["horizontal"] or metrics["upper_body_horizontal"])
@@ -177,10 +196,25 @@ class FallDetector:
             )
         return self.get_state()
 
-    def update_no_pose(self, *, diagnostics: dict | None = None) -> dict:
-        if diagnostics is not None:
-            self._record_reset(diagnostics, "pose_not_detected")
-        self._break_observation()
+    def update_no_pose(
+        self, *, diagnostics: dict | None = None, allow_grace: bool = True
+    ) -> dict:
+        if (
+            allow_grace
+            and self.status == "FALL_SUSPECTED"
+            and not self.missing_pose_pending
+            and self.last_observation_time is not None
+            and time.monotonic() - self.last_observation_time <= SUSPECTED_MISSING_FRAME_GRACE_SECONDS
+        ):
+            self.missing_pose_pending = True
+            self.upright_center_history.clear()
+            self.upright_head_shoulder_history.clear()
+            if diagnostics is not None:
+                diagnostics["pose_gap_grace"] = "waiting"
+        else:
+            if diagnostics is not None:
+                self._record_reset(diagnostics, "pose_not_detected")
+            self._break_observation()
         self.last_metrics = self._empty_metrics()
         self._new_event = False
         return self.get_state()
@@ -199,6 +233,7 @@ class FallDetector:
         self.upright_center_history.clear()
         self.upright_head_shoulder_history.clear()
         self.last_observation_time = None
+        self.missing_pose_pending = False
         self.low_pose_since = None
         self.recovery_since = None
         if self.status == "FALL_SUSPECTED":
@@ -209,7 +244,7 @@ class FallDetector:
         if not in_frame:
             history.clear()
             return False
-        while history and now - history[0][0] > DROP_WINDOW_SECONDS:
+        while history and now - history[0][0] > HEAD_SHOULDER_DROP_WINDOW_SECONDS:
             history.popleft()
 
         nose_y = landmarks[NOSE].y

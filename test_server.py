@@ -41,16 +41,12 @@ def analyze(mode, session_id, image_bytes, *, diagnostics=None):
         ]
         if mode == "fall":
             if not result["detected"]:
-                if session["fall"].status == "FALL_SUSPECTED":
-                    session["fall"].reset()
                 state = session["fall"].update_no_pose(diagnostics=diagnostics)
                 _record_fall_state(diagnostics, state)
                 return {"detected": False, "fall_status": "UNKNOWN", "fall_metrics": {}, "landmarks": landmarks}
             state = session["fall"].update(result["landmarks"], diagnostics=diagnostics)
             _record_fall_state(diagnostics, state)
             if not state["fall_metrics"]["head_shoulders_visible"]:
-                if session["fall"].status == "FALL_SUSPECTED":
-                    session["fall"].reset()
                 return {"detected": False, "fall_status": "UNKNOWN", "fall_metrics": state["fall_metrics"], "landmarks": landmarks}
             return {"detected": True, "fall_status": state["fall_status"],
                     "fall_detected": state["fall_detected"], "fall_metrics": state["fall_metrics"],
