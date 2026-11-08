@@ -54,16 +54,23 @@ class FallDetector:
         self.last_metrics = self._empty_metrics()
         return self.get_state()
 
-    def update(self, landmarks) -> dict:
+    def update(self, landmarks, *, diagnostics: dict | None = None) -> dict:
         now = time.monotonic()
+        if diagnostics is not None and self.last_observation_time is not None:
+            diagnostics["observation_gap_ms"] = (now - self.last_observation_time) * 1000
         if (
             self.last_observation_time is not None
             and now - self.last_observation_time > MAX_OBSERVATION_GAP_SECONDS
         ):
             self._break_observation()
+            if diagnostics is not None:
+                self._record_reset(diagnostics, "observation_gap")
 
+        history_size = len(self.upright_center_history) if diagnostics is not None else 0
         metrics, upright_pose = self._calculate_metrics(landmarks, now)
         if not metrics["reliable_upper_body_visible"]:
+            if diagnostics is not None:
+                self._record_reset(diagnostics, "low_landmark_visibility")
             return self.update_no_pose()
 
         self.last_observation_time = now
@@ -91,6 +98,16 @@ class FallDetector:
             metrics["sudden_drop"]
             and (metrics["horizontal"] or metrics["upper_body_horizontal"])
         )
+        if diagnostics is not None:
+            diagnostics.update(
+                upright_pose=upright_pose,
+                upright_history_count=len(self.upright_center_history),
+                upright_samples_expired=(
+                    history_size + int(upright_pose) - len(self.upright_center_history)
+                ),
+                low_fall_pose=low_fall_pose,
+                fall_motion=fall_motion,
+            )
 
         if self.status in ("NORMAL", "RECOVERED"):
             if fall_motion:
@@ -132,13 +149,28 @@ class FallDetector:
             else:
                 self.recovery_since = None
 
+        if diagnostics is not None:
+            diagnostics["low_pose_ms"] = (
+                (now - self.low_pose_since) * 1000
+                if low_fall_pose and self.low_pose_since is not None
+                else None
+            )
         return self.get_state()
 
-    def update_no_pose(self) -> dict:
+    def update_no_pose(self, *, diagnostics: dict | None = None) -> dict:
+        if diagnostics is not None:
+            self._record_reset(diagnostics, "pose_not_detected")
         self._break_observation()
         self.last_metrics = self._empty_metrics()
         self._new_event = False
         return self.get_state()
+
+    @staticmethod
+    def _record_reset(diagnostics: dict, reason: str) -> None:
+        previous = diagnostics.get("observation_reset_reason")
+        diagnostics["observation_reset_reason"] = f"{previous};{reason}" if previous else reason
+        diagnostics["upright_history_count"] = 0
+        diagnostics.update(upright_pose=False, low_fall_pose=False, fall_motion=False)
 
     def _break_observation(self) -> None:
         self.upright_center_history.clear()
