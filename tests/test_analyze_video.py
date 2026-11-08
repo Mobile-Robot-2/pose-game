@@ -23,6 +23,13 @@ class FakeAnalyzer:
         pass
 
 
+class MissingFrameAnalyzer(FakeAnalyzer):
+    def analyze_image_bytes(self, image, *, timestamp_ms):
+        if timestamp_ms == 400:
+            return {"detected": False, "landmarks": None, "detections": {}}
+        return super().analyze_image_bytes(image, timestamp_ms=timestamp_ms)
+
+
 class AnalyzeVideoTest(unittest.TestCase):
     def setUp(self):
         test_root = Path("data")
@@ -46,6 +53,18 @@ class AnalyzeVideoTest(unittest.TestCase):
         self.assertEqual(FakeAnalyzer.timestamps, [0, 200, 400, 600, 800, 1000, 1200])
         self.assertEqual(rows[1]["fall_status"], "FALL_SUSPECTED")
         self.assertEqual(rows[-1]["fall_status"], "FALL_CONFIRMED")
+
+    @patch("analyze_video.PoseAnalyzer", MissingFrameAnalyzer)
+    def test_missing_frame_grace_uses_video_time(self):
+        output = Path(self.directory.name) / "missing.csv"
+        with patch("fall_detector.time.monotonic", return_value=10000.0):
+            analyze_video(self.video, "fall", output)
+        with output.open(encoding="utf-8-sig", newline="") as file:
+            rows = list(csv.DictReader(file))
+        self.assertEqual(rows[1]["fall_status"], "FALL_SUSPECTED")
+        self.assertEqual(rows[2]["fall_status"], "UNKNOWN")
+        self.assertEqual(rows[3]["fall_status"], "FALL_SUSPECTED")
+        self.assertEqual(rows[-1]["fall_status"], "FALL_SUSPECTED")
 
     @patch("analyze_video.PoseAnalyzer", FakeAnalyzer)
     def test_rhythm_reports_all_candidates_and_does_not_overwrite(self):

@@ -108,14 +108,31 @@ class FallDetectorTest(unittest.TestCase):
         self.observe(1.5, LYING, "NORMAL")
         self.observe(2.0, LYING, "NORMAL")
 
-    def test_missing_or_unreliable_pose_cancels_suspicion(self):
-        for landmarks in (None, OCCLUDED, LOW_VISIBILITY):
+    def test_unreliable_pose_cancels_suspicion(self):
+        for landmarks in (OCCLUDED, LOW_VISIBILITY):
             with self.subTest(landmarks=landmarks):
                 self.detector.reset()
                 self.begin_fall()
                 self.observe(0.75, landmarks, "NORMAL")
                 self.observe(1.0, LYING, "NORMAL")
                 self.observe(1.5, LYING, "NORMAL")
+
+    def test_one_missing_frame_preserves_only_observed_hold_time(self):
+        self.begin_fall()
+        self.observe(0.75, LYING, "FALL_SUSPECTED")
+        missing = self.observe(1.15, None, "FALL_SUSPECTED")
+        self.assertFalse(missing["fall_event"]["new_event"])
+        self.observe(1.55, LYING, "FALL_SUSPECTED")
+        self.observe(1.95, LYING, "FALL_SUSPECTED")
+        self.observe(2.15, LYING, "FALL_CONFIRMED")
+
+    def test_missing_frame_grace_expires_or_rejects_non_low_pose(self):
+        for timestamp, landmarks in ((1.2, None), (1.51, LYING), (1.3, STANDING), (1.3, BENDING)):
+            with self.subTest(timestamp=timestamp, landmarks=landmarks):
+                self.detector.reset()
+                self.begin_fall()
+                self.observe(0.9, None, "FALL_SUSPECTED")
+                self.observe(timestamp, landmarks, "NORMAL")
 
     def test_old_upright_reference_expires_without_a_frame_gap(self):
         self.observe(0.0, STANDING, "NORMAL")
@@ -137,6 +154,47 @@ class FallDetectorTest(unittest.TestCase):
         self.observe(1.0, LYING, "FALL_SUSPECTED")
         self.observe(1.5, LYING, "FALL_SUSPECTED")
         self.observe(2.0, LYING, "FALL_CONFIRMED")
+
+    def test_lower_angle_can_sustain_but_not_start_suspicion(self):
+        # A low nose and shoulders, upper-body angle about 45 degrees,
+        # and a vertical torso reproduce the intermediate Temi frames.
+        low_bent = pose((0.38, 0.58), (0.50, 0.46), (0.50, 0.69))
+        self.observe(0.0, STANDING, "NORMAL")
+        self.observe(0.5, low_bent, "NORMAL")
+        self.observe(1.0, low_bent, "NORMAL")
+
+        self.detector.reset()
+        self.begin_fall()
+        self.observe(1.0, low_bent, "FALL_SUSPECTED")
+        self.observe(1.5, low_bent, "FALL_CONFIRMED")
+
+    def test_frontal_drop_confirms_with_low_in_frame_pose(self):
+        low_pose = pose((0.50, 0.70), (0.50, 0.62), (0.50, 0.75))
+        self.observe(0.0, STANDING, "NORMAL")
+        state = self.observe(0.4, low_pose, "FALL_SUSPECTED")
+        self.assertFalse(state["fall_metrics"]["upper_body_horizontal"])
+        self.assertFalse(state["fall_metrics"]["horizontal"])
+        self.observe(0.8, low_pose, "FALL_SUSPECTED")
+        self.observe(1.2, low_pose, "FALL_SUSPECTED")
+        self.observe(1.55, low_pose, "FALL_SUSPECTED")
+        self.observe(1.65, low_pose, "FALL_CONFIRMED")
+
+    def test_frontal_drop_does_not_use_expired_upright_sample(self):
+        middle_pose = pose((0.50, 0.37), (0.50, 0.47), (0.50, 0.65))
+        low_pose = pose((0.50, 0.70), (0.50, 0.62), (0.50, 0.75))
+        for timestamp, expected in ((0.82, "FALL_SUSPECTED"), (0.86, "NORMAL")):
+            with self.subTest(timestamp=timestamp):
+                self.detector.reset()
+                self.observe(0.0, STANDING, "NORMAL")
+                self.observe(0.4, middle_pose, "NORMAL")
+                state = self.observe(timestamp, low_pose, expected)
+                self.assertFalse(state["fall_metrics"]["sudden_drop"])
+
+    def test_out_of_frame_hips_cannot_sustain_angle_free_confirmation(self):
+        out_of_frame = pose((0.50, 0.70), (0.50, 0.62), (0.50, 1.10))
+        self.begin_fall()
+        self.observe(1.0, out_of_frame, "FALL_SUSPECTED")
+        self.observe(1.5, out_of_frame, "NORMAL")
 
     def test_missing_or_unreliable_pose_interrupts_recovery(self):
         for landmarks in (None, OCCLUDED, LOW_VISIBILITY):

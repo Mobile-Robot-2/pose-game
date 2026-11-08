@@ -65,7 +65,7 @@ def analyze_video(video_path: Path, mode: str, output_path: Path, interval: floa
                        "pose_detected": analysis["detected"]}
                 if mode == "fall":
                     state = (detector.update(analysis["landmarks"], timestamp=timestamp)
-                             if analysis["detected"] else detector.update_no_pose())
+                             if analysis["detected"] else detector.update_no_pose(timestamp=timestamp))
                     metrics = state["fall_metrics"]
                     reliable = analysis["detected"] and metrics["reliable_upper_body_visible"]
                     row.update(fall_status=state["fall_status"] if reliable else "UNKNOWN",

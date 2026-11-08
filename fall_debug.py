@@ -30,12 +30,13 @@ CONNECTIONS = (
 )
 FIELDS = (
     "frame_id", "timestamp", "endpoint", "session_id", "frame_interval_ms",
-    "observation_gap_ms", "inference_ms", "handler_ms", "width", "height",
+    "observation_gap_ms", "pose_gap_grace", "inference_ms", "handler_ms", "width", "height",
     "pose_detected", "nose_y", "shoulder_y", "hip_y", "body_center_y",
     "torso_angle", "upper_body_angle", "upright_pose", "upright_history_count",
     "upright_samples_expired", "center_drop", "sudden_drop", "horizontal",
     "upper_body_horizontal", "low_position", "low_fall_pose", "fall_motion",
-    "low_pose_ms", "fall_status", "fall_detected", "landmark_visibility",
+    "angle_fall_motion", "head_shoulder_drop",
+    "low_pose_ms", "fall_status", "response_fall_status", "fall_detected", "landmark_visibility",
     "landmark_presence", "landmark_xy", "observation_reset_reason", "processing_error",
     "comparison_image",
 )
