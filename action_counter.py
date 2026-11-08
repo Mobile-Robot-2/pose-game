@@ -61,7 +61,7 @@ def is_right_hand_up(landmarks) -> bool:
 def is_arms_open(landmarks) -> bool:
     if not _visibility_ok(
         landmarks,
-        (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_WRIST, RIGHT_WRIST),
+        (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_WRIST, RIGHT_WRIST),
     ):
         return False
 
@@ -69,20 +69,31 @@ def is_arms_open(landmarks) -> bool:
     right_shoulder = landmarks[RIGHT_SHOULDER]
     left_wrist = landmarks[LEFT_WRIST]
     right_wrist = landmarks[RIGHT_WRIST]
+    left_elbow = landmarks[LEFT_ELBOW]
+    right_elbow = landmarks[RIGHT_ELBOW]
+
+    if not all(0 <= point.x <= 1 and 0 <= point.y <= 1
+               for point in (left_elbow, right_elbow, left_wrist, right_wrist)):
+        return False
 
     shoulder_width = _shoulder_width(landmarks)
     wrists_width = abs(right_wrist.x - left_wrist.x)
     shoulder_y = (left_shoulder.y + right_shoulder.y) / 2
 
-    left_open = left_wrist.x < left_shoulder.x - shoulder_width * 0.20
-    right_open = right_wrist.x > right_shoulder.x + shoulder_width * 0.20
+    direction = 1 if left_shoulder.x > right_shoulder.x else -1
+    left_open = (left_wrist.x - left_shoulder.x) * direction > shoulder_width * 0.20
+    right_open = (right_wrist.x - right_shoulder.x) * direction < -shoulder_width * 0.20
     wrists_near_shoulder_height = (
         abs(left_wrist.y - shoulder_y) <= ARMS_OPEN_Y_TOLERANCE
         and abs(right_wrist.y - shoulder_y) <= ARMS_OPEN_Y_TOLERANCE
     )
+    elbows_near_shoulder_height = (
+        abs(left_elbow.y - left_shoulder.y) <= shoulder_width * 0.5
+        and abs(right_elbow.y - right_shoulder.y) <= shoulder_width * 0.5
+    )
     wide_enough = wrists_width >= shoulder_width * 1.45
 
-    return left_open and right_open and wrists_near_shoulder_height and wide_enough
+    return left_open and right_open and wrists_near_shoulder_height and elbows_near_shoulder_height and wide_enough
 
 
 def is_clap(landmarks) -> bool:
