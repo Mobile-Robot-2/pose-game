@@ -29,6 +29,8 @@ CONNECTIONS = (
     (11, 23), (12, 24), (23, 24), (23, 25), (25, 27), (24, 26), (26, 28),
 )
 FIELDS = (
+    "experiment_id", "participant_id", "trial_id", "trial_number", "set_number",
+    "action", "experiment_phase",
     "frame_id", "timestamp", "endpoint", "session_id", "frame_interval_ms",
     "observation_gap_ms", "pose_gap_grace", "inference_ms", "handler_ms", "width", "height",
     "pose_detected", "nose_y", "shoulder_y", "hip_y", "body_center_y",
@@ -52,6 +54,7 @@ class FallDebugRecorder:
         self._last_request = {}
         self._queue = Queue(maxsize=16)
         self._dropped = 0
+        self._errors = 0
         self._file = (self.directory / "frames.csv").open("w", newline="", encoding="utf-8")
         self._worker = Thread(target=self._write, name="fall-debug", daemon=True)
         self._worker.start()
@@ -93,6 +96,14 @@ class FallDebugRecorder:
         if self._dropped:
             LOGGER.warning("Dropped %d fall diagnostic records", self._dropped)
 
+    @property
+    def dropped_records(self) -> int:
+        return self._dropped
+
+    @property
+    def write_errors(self) -> int:
+        return self._errors
+
     def _write(self) -> None:
         with self._file:
             writer = csv.DictWriter(self._file, fieldnames=FIELDS, extrasaction="ignore")
@@ -100,12 +111,14 @@ class FallDebugRecorder:
                 writer.writeheader()
                 self._file.flush()
             except OSError:
+                self._errors += 1
                 LOGGER.exception("Could not initialize fall diagnostics CSV")
             while (row := self._queue.get()) is not None:
                 try:
                     self._write_row(writer, row)
                     self._file.flush()
                 except Exception:
+                    self._errors += 1
                     LOGGER.exception("Could not write fall diagnostics for frame %s", row["frame_id"])
 
     def _write_row(self, writer, row: dict) -> None:
@@ -127,6 +140,7 @@ class FallDebugRecorder:
             try:
                 self._save_comparison(row, landmarks)
             except (OSError, cv2.error):
+                self._errors += 1
                 LOGGER.exception("Could not save fall comparison for frame %s", row["frame_id"])
         writer.writerow(row)
 

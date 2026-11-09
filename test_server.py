@@ -2,21 +2,65 @@
 import logging
 import os
 from pathlib import Path
-from threading import Lock
+from threading import RLock
+from contextlib import nullcontext
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, model_validator
 
+from experiment_manager import (
+    ExperimentConflict, ExperimentManager, FALL_ACTIONS, NONFALL_ACTIONS, csv_text,
+)
 from fall_debug import FallDebugRecorder
 from fall_detector import FallDetector
 from pose_analyzer import PoseAnalyzer
 
 app = FastAPI(title="Pose Test API")
-lock = Lock()
+lock = RLock()
 sessions = {}
 fall_debug: FallDebugRecorder | None = None
+experiments: ExperimentManager | None = None
+BASE_DIR = Path(__file__).resolve().parent
+app.mount("/experiment/assets", StaticFiles(directory=str(BASE_DIR / "static")), name="experiment-assets")
 
 
-def analyze(mode, session_id, image_bytes, *, diagnostics=None):
+def analyze(mode, session_id, image_bytes, *, diagnostics=None, experiment_ticket=None):
+    with lock:
+        manager = experiments if mode == "fall" else None
+        ticket = experiment_ticket
+        if manager and ticket is None:
+            ticket = manager.ticket(session_id)
+        context = manager.capture_frame(ticket, image_bytes) if manager else nullcontext()
+        with context as trial_diagnostics:
+            primary = diagnostics if diagnostics is not None else trial_diagnostics
+            if manager and manager.is_recording() and trial_diagnostics is None:
+                # A delayed preparation frame or foreign session cannot change
+                # the active trial's MediaPipe tracker or fall detector.
+                result = dict(detected=False, fall_status="UNKNOWN", fall_metrics={}, landmarks=[])
+                if primary is not None:
+                    primary.update(processing_error="experiment_frame_excluded",
+                                   response_fall_status="UNKNOWN")
+            else:
+                result = _analyze_locked(mode, session_id, image_bytes, diagnostics=primary)
+            if manager:
+                if trial_diagnostics is not None and trial_diagnostics is not primary:
+                    trial_diagnostics.update({
+                        key: value for key, value in primary.items()
+                        if key not in {"frame_id", "timestamp", "endpoint", "session_id", "save_frames"}
+                    })
+                manager.record_frame(ticket, result, trial_diagnostics)
+            if diagnostics is not None:
+                diagnostics["experiment_phase"] = "recording" if trial_diagnostics else "preparation"
+                if trial_diagnostics is not None:
+                    for key in ("experiment_id", "participant_id", "trial_id", "trial_number",
+                                "set_number", "action"):
+                        diagnostics[key] = trial_diagnostics[key]
+            return result
+
+
+def _analyze_locked(mode, session_id, image_bytes, *, diagnostics=None):
     if not image_bytes:
         raise ValueError("Empty image file")
     with lock:
@@ -65,16 +109,17 @@ def _record_fall_state(diagnostics, state):
 
 
 async def analyze_upload(mode, image, session_id):
+    ticket = experiments.ticket(session_id) if mode == "fall" and experiments else None
     try:
         if mode == "fall" and fall_debug is not None:
             with fall_debug.capture("/test/fall", session_id) as diagnostics:
                 image_bytes = await image.read()
                 if diagnostics["save_frames"]:
                     diagnostics["image_bytes"] = image_bytes
-                result = analyze(mode, session_id, image_bytes, diagnostics=diagnostics)
+                result = analyze(mode, session_id, image_bytes, diagnostics=diagnostics, experiment_ticket=ticket)
                 diagnostics["response_fall_status"] = result["fall_status"]
                 return result
-        return analyze(mode, session_id, await image.read())
+        return analyze(mode, session_id, await image.read(), experiment_ticket=ticket)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -91,8 +136,10 @@ async def test_rhythm(image: UploadFile = File(...), session_id: str = Form(...)
 
 @app.on_event("startup")
 def startup():
-    global fall_debug
+    global fall_debug, experiments
     mode = os.environ.get("FALL_DEBUG", "").strip().lower()
+    experiments = ExperimentManager(BASE_DIR / "data" / "experiments", lock, save_frames=mode == "frames")
+    experiments.start_monitor()
     if mode in {"csv", "frames"}:
         try:
             root = Path(__file__).resolve().parent / "data" / "fall_debug"
@@ -103,10 +150,137 @@ def startup():
 
 @app.on_event("shutdown")
 def shutdown():
-    global fall_debug
+    global fall_debug, experiments
+    if experiments is not None:
+        experiments.close()
+        experiments = None
     if fall_debug is not None:
         fall_debug.close()
         fall_debug = None
     for session in sessions.values():
         session["analyzer"].close()
     sessions.clear()
+
+
+class ExperimentConfig(BaseModel):
+    experiment_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    participant_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
+    experiment_type: str = Field(pattern=r"^(fall|nonfall)$")
+    actions: list[str] = Field(min_length=1, max_length=4)
+    sets: int = Field(default=5, ge=1, le=100)
+    observation_seconds: float = Field(default=10, ge=1, le=300, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def check_actions(self):
+        allowed = FALL_ACTIONS if self.experiment_type == "fall" else NONFALL_ACTIONS
+        if len(set(self.actions)) != len(self.actions) or any(action not in allowed for action in self.actions):
+            raise ValueError("실험 동작 목록이 올바르지 않습니다.")
+        return self
+
+
+class TrialCommand(BaseModel):
+    experiment_id: str
+    trial_id: str
+
+
+class Review(TrialCommand):
+    actual_action: str = Field(default="", max_length=200)
+    actual_fall: bool | None = None
+    valid: bool | None = None
+    notes: str = Field(default="", max_length=1000)
+
+
+def experiment_manager():
+    if experiments is None:
+        raise HTTPException(503, "실험 관리가 시작되지 않았습니다.")
+    return experiments
+
+
+@app.exception_handler(ExperimentConflict)
+async def experiment_conflict(request, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.get("/experiment", include_in_schema=False)
+def experiment_page():
+    return FileResponse(BASE_DIR / "templates" / "experiment.html")
+
+
+@app.get("/experiment/api/state")
+def experiment_state():
+    return experiment_manager().snapshot()
+
+
+@app.post("/experiment/api/create")
+def experiment_create(config: ExperimentConfig):
+    manager = experiment_manager()
+    manager.create(config.experiment_id, config.participant_id, config.experiment_type,
+                   config.actions, config.sets, config.observation_seconds)
+    return manager.snapshot()
+
+
+@app.post("/experiment/api/start")
+def experiment_start(command: TrialCommand):
+    with lock:
+        session = sessions.get("fall")
+        manager = experiment_manager()
+        manager.start_trial(
+            command.experiment_id, command.trial_id,
+            session["fall"].reset if session else lambda: None,
+            session["id"] if session else None,
+        )
+        return manager.snapshot()
+
+
+@app.post("/experiment/api/end")
+def experiment_end(command: TrialCommand):
+    manager = experiment_manager()
+    manager.end_trial(command.experiment_id, command.trial_id)
+    return manager.snapshot()
+
+
+@app.post("/experiment/api/next")
+def experiment_next(command: TrialCommand):
+    manager = experiment_manager()
+    manager.next_trial(command.experiment_id, command.trial_id)
+    return manager.snapshot()
+
+
+@app.post("/experiment/api/finish")
+def experiment_finish(command: TrialCommand):
+    manager = experiment_manager()
+    manager.finish(command.experiment_id)
+    return manager.snapshot()
+
+
+@app.post("/experiment/api/review")
+def experiment_review(review: Review):
+    manager = experiment_manager()
+    manager.annotate(review.experiment_id, review.trial_id, review.actual_action,
+                     review.actual_fall, review.valid, review.notes)
+    return manager.snapshot()
+
+
+@app.post("/experiment/api/select")
+def experiment_select(command: TrialCommand):
+    manager = experiment_manager()
+    manager.select(command.experiment_id)
+    return manager.snapshot()
+
+
+@app.get("/experiment/api/preview/{run_id}/{trial_id}")
+def experiment_preview(run_id: str, trial_id: str):
+    path = experiment_manager().preview(run_id, trial_id)
+    if path is None:
+        raise HTTPException(404, "저장된 이미지가 아직 없습니다.")
+    return FileResponse(path, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/experiment/api/results.csv")
+def experiment_csv():
+    manager = experiment_manager()
+    with lock:
+        rows = [trial for run in manager.runs.values() for trial in run["trials"]]
+        return Response(csv_text(rows), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="experiment-results.csv"'})
