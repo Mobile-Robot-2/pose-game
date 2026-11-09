@@ -8,6 +8,21 @@ COUNT_COOLDOWN_SECONDS = 0.8
 
 ACTION_NAMES = ("LEFT_HAND_UP", "RIGHT_HAND_UP", "ARMS_OPEN", "CLAP")
 
+
+def classify_actions(actions, *, pose_detected=True):
+    """Return an unbiased experiment prediction and its reason."""
+    if not pose_detected:
+        return None, "pose_not_detected"
+    candidates = set(actions)
+    if "ARMS_OPEN" in candidates and "CLAP" in candidates:
+        return None, "conflict"
+    for action in ("ARMS_OPEN", "CLAP"):
+        if action in candidates:
+            return action, "detected"
+    if len(candidates) == 1:
+        return next(iter(candidates)), "detected"
+    return None, "conflict" if candidates else "no_action"
+
 ACTION_TIMELINE = [
     {"start": 0.0, "end": 5.0, "action": "LEFT_HAND_UP", "score": 10},
     {"start": 5.0, "end": 10.0, "action": "RIGHT_HAND_UP", "score": 10},
@@ -21,8 +36,10 @@ LEFT_ELBOW = 13
 RIGHT_ELBOW = 14
 LEFT_WRIST = 15
 RIGHT_WRIST = 16
+LEFT_INDEX = 19
+RIGHT_INDEX = 20
 
-MIN_RAISE_MARGIN_Y = 0.08
+MIN_RAISE_MARGIN_Y = 0.02
 ARMS_OPEN_Y_TOLERANCE = 0.28
 MIN_SHOULDER_WIDTH = 0.10
 
@@ -42,26 +59,37 @@ def _shoulder_width(landmarks) -> float:
     return max(width, MIN_SHOULDER_WIDTH)
 
 
-def is_left_hand_up(landmarks) -> bool:
-    if not _visibility_ok(landmarks, (LEFT_SHOULDER, LEFT_WRIST)):
+def _is_hand_up(landmarks, shoulder_index, wrist_index, finger_index) -> bool:
+    if not _visibility_ok(landmarks, (shoulder_index, wrist_index)):
         return False
-    left_shoulder = landmarks[LEFT_SHOULDER]
-    left_wrist = landmarks[LEFT_WRIST]
-    return left_wrist.y < left_shoulder.y - MIN_RAISE_MARGIN_Y
+    shoulder, wrist = landmarks[shoulder_index], landmarks[wrist_index]
+    if wrist.y < shoulder.y - MIN_RAISE_MARGIN_Y:
+        return True
+    if len(landmarks) <= finger_index or not _visibility_ok(landmarks, (finger_index,)):
+        return False
+    finger = landmarks[finger_index]
+    return (
+        wrist.y < shoulder.y + 0.04
+        and finger.y < shoulder.y - 0.08
+        and 0 <= wrist.x <= 1 and 0 <= wrist.y <= 1
+        and 0 <= finger.x <= 1 and 0 <= finger.y <= 1
+        and 0 < wrist.y - finger.y <= 0.25
+        and abs(wrist.x - finger.x) <= _shoulder_width(landmarks)
+    )
+
+
+def is_left_hand_up(landmarks) -> bool:
+    return _is_hand_up(landmarks, LEFT_SHOULDER, LEFT_WRIST, LEFT_INDEX)
 
 
 def is_right_hand_up(landmarks) -> bool:
-    if not _visibility_ok(landmarks, (RIGHT_SHOULDER, RIGHT_WRIST)):
-        return False
-    right_shoulder = landmarks[RIGHT_SHOULDER]
-    right_wrist = landmarks[RIGHT_WRIST]
-    return right_wrist.y < right_shoulder.y - MIN_RAISE_MARGIN_Y
+    return _is_hand_up(landmarks, RIGHT_SHOULDER, RIGHT_WRIST, RIGHT_INDEX)
 
 
 def is_arms_open(landmarks) -> bool:
     if not _visibility_ok(
         landmarks,
-        (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_WRIST, RIGHT_WRIST),
+        (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_WRIST, RIGHT_WRIST),
     ):
         return False
 
@@ -69,20 +97,31 @@ def is_arms_open(landmarks) -> bool:
     right_shoulder = landmarks[RIGHT_SHOULDER]
     left_wrist = landmarks[LEFT_WRIST]
     right_wrist = landmarks[RIGHT_WRIST]
+    left_elbow = landmarks[LEFT_ELBOW]
+    right_elbow = landmarks[RIGHT_ELBOW]
+
+    if not all(0 <= point.x <= 1 and 0 <= point.y <= 1
+               for point in (left_elbow, right_elbow, left_wrist, right_wrist)):
+        return False
 
     shoulder_width = _shoulder_width(landmarks)
     wrists_width = abs(right_wrist.x - left_wrist.x)
     shoulder_y = (left_shoulder.y + right_shoulder.y) / 2
 
-    left_open = left_wrist.x < left_shoulder.x - shoulder_width * 0.20
-    right_open = right_wrist.x > right_shoulder.x + shoulder_width * 0.20
+    direction = 1 if left_shoulder.x > right_shoulder.x else -1
+    left_open = (left_wrist.x - left_shoulder.x) * direction > shoulder_width * 0.20
+    right_open = (right_wrist.x - right_shoulder.x) * direction < -shoulder_width * 0.20
     wrists_near_shoulder_height = (
         abs(left_wrist.y - shoulder_y) <= ARMS_OPEN_Y_TOLERANCE
         and abs(right_wrist.y - shoulder_y) <= ARMS_OPEN_Y_TOLERANCE
     )
+    elbows_near_shoulder_height = (
+        abs(left_elbow.y - left_shoulder.y) <= shoulder_width * 0.5
+        and abs(right_elbow.y - right_shoulder.y) <= shoulder_width * 0.5
+    )
     wide_enough = wrists_width >= shoulder_width * 1.45
 
-    return left_open and right_open and wrists_near_shoulder_height and wide_enough
+    return left_open and right_open and wrists_near_shoulder_height and elbows_near_shoulder_height and wide_enough
 
 
 def is_clap(landmarks) -> bool:
@@ -100,7 +139,7 @@ def is_clap(landmarks) -> bool:
     wrist_y_distance = abs(left_wrist.y - right_wrist.y)
 
     return (
-        wrist_distance <= shoulder_width * 0.65
+        wrist_distance <= shoulder_width * 0.75
         and wrist_y_distance <= shoulder_width * 0.55
     )
 
@@ -117,6 +156,62 @@ def detect_actions(landmarks) -> dict[str, bool]:
     }
 
 
+class ClapDetector:
+    """Emit one event when the visible hands move close together."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.contact = False
+        self.armed = False
+        self.last_seen = None
+
+    def update(self, landmarks, timestamp: float) -> bool:
+        # Partial tracking can arm a possible separation but cannot trigger a clap.
+        if landmarks and len(landmarks) > RIGHT_WRIST and _visibility_ok(
+                landmarks, (LEFT_SHOULDER, RIGHT_SHOULDER)):
+            left, right = landmarks[LEFT_WRIST], landmarks[RIGHT_WRIST]
+            inside = lambda p: 0 <= p.x <= 1 and 0 <= p.y <= 1
+            visible = lambda p: inside(p) and getattr(p, "visibility", 1.0) >= 0.35
+            separated_at_edge = (
+                (visible(left) and not visible(right))
+                or (visible(right) and not visible(left))
+            ) and math.hypot(left.x - right.x, left.y - right.y) / _shoulder_width(landmarks) >= 0.9
+            if separated_at_edge:
+                if self.last_seen is not None and (timestamp <= self.last_seen or timestamp - self.last_seen > 1.0):
+                    self.reset()
+                self.last_seen = timestamp
+                self.contact = False
+                self.armed = True
+                return False
+        if (not landmarks or len(landmarks) <= RIGHT_WRIST
+                or not _visibility_ok(landmarks, (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_WRIST, RIGHT_WRIST))):
+            if self.last_seen is not None and timestamp - self.last_seen > 1.0:
+                self.reset()
+            return False
+
+        left, right = landmarks[LEFT_WRIST], landmarks[RIGHT_WRIST]
+        if not all(0 <= point.x <= 1 and 0 <= point.y <= 1 for point in (left, right)):
+            if self.last_seen is not None and timestamp - self.last_seen > 1.0:
+                self.reset()
+            return False
+
+        if self.last_seen is not None and (timestamp <= self.last_seen or timestamp - self.last_seen > 1.0):
+            self.reset()
+        self.last_seen = timestamp
+
+        distance = math.hypot(left.x - right.x, left.y - right.y) / _shoulder_width(landmarks)
+        if distance >= 0.9:
+            self.contact = False
+            self.armed = True
+        elif self.armed and not self.contact and is_clap(landmarks):
+            self.contact = True
+            self.armed = False
+            return True
+        return False
+
+
 class ActionCounter:
     def __init__(self) -> None:
         self.reset()
@@ -125,7 +220,9 @@ class ActionCounter:
         self.counts = {action: 0 for action in ACTION_NAMES}
         self.action_active = {action: False for action in ACTION_NAMES}
         self.action_armed = {action: False for action in ACTION_NAMES}
-        self.last_count_time = {action: 0.0 for action in ACTION_NAMES}
+        # ClapDetector emits an event rather than a continuously held pose.
+        self.action_armed["CLAP"] = True
+        self.last_count_time = {action: float("-inf") for action in ACTION_NAMES}
         self.scored_segments = set()
         self.total_pose_score = 0
         self.start_time = time.monotonic()

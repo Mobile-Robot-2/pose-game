@@ -7,7 +7,7 @@ import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-from action_counter import ACTION_NAMES, detect_actions
+from action_counter import ACTION_NAMES, ClapDetector, detect_actions
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -35,14 +35,28 @@ class PoseAnalyzer:
         self.landmarker = vision.PoseLandmarker.create_from_options(options)
         self.start_time = time.time()
         self.last_timestamp_ms = -1
+        self.clap_detector = ClapDetector()
 
-    def analyze_image_bytes(self, image_bytes: bytes) -> dict:
+    def analyze_image_bytes(self, image_bytes: bytes, *, diagnostics: dict | None = None,
+                            timestamp_ms: int | None = None) -> dict:
         bgr_image = self._decode_image(image_bytes)
         rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
 
-        result = self.landmarker.detect_for_video(mp_image, self._next_timestamp_ms())
+        if timestamp_ms is None:
+            timestamp_ms = self._next_timestamp_ms()
+        else:
+            if timestamp_ms < 0 or timestamp_ms <= self.last_timestamp_ms:
+                raise ValueError("Video timestamps must be nonnegative and strictly increasing.")
+            self.last_timestamp_ms = timestamp_ms
+        if diagnostics is not None:
+            diagnostics["height"], diagnostics["width"] = bgr_image.shape[:2]
+            inference_start = time.perf_counter()
+        result = self.landmarker.detect_for_video(mp_image, timestamp_ms)
+        if diagnostics is not None:
+            diagnostics["inference_ms"] = (time.perf_counter() - inference_start) * 1000
         if not result.pose_landmarks:
+            self.clap_detector.update(None, timestamp_ms / 1000)
             return {
                 "detected": False,
                 "detections": {action: False for action in ACTION_NAMES},
@@ -50,11 +64,20 @@ class PoseAnalyzer:
             }
 
         landmarks = result.pose_landmarks[0]
+        detections = detect_actions(landmarks)
+        detections["CLAP"] = self.clap_detector.update(landmarks, timestamp_ms / 1000)
+        raw_detections = dict(detections)
+        if detections["CLAP"]:
+            detections = {action: action == "CLAP" for action in ACTION_NAMES}
         return {
             "detected": True,
-            "detections": detect_actions(landmarks),
+            "detections": detections,
+            "raw_detections": raw_detections,
             "landmarks": landmarks,
         }
+
+    def reset_actions(self) -> None:
+        self.clap_detector.reset()
 
     def close(self) -> None:
         self.landmarker.close()

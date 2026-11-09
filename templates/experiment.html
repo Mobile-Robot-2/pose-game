@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Temi 낙상 실험</title>
+  <link rel="stylesheet" href="/experiment/assets/experiment.css">
+  <script src="/experiment/assets/experiment.js" defer></script>
+</head>
+<body>
+<main>
+  <header>
+    <div><p class="eyebrow">TEMI · EXPERIMENT</p><h1>낙상 감지 실험</h1></div>
+    <a href="/experiment/api/results.csv" class="download">전체 결과 CSV 내려받기</a>
+  </header>
+  <p id="message" role="status" aria-live="polite">서버에 연결하고 있습니다.</p>
+
+  <section aria-labelledby="setup-heading">
+    <h2 id="setup-heading">실험 설정</h2>
+    <form id="setup">
+      <div class="fields">
+        <label>참가자 ID<input id="participant" value="P01" required maxlength="32" pattern="[A-Za-z0-9_-]+"></label>
+        <label>실험 종류<select id="kind"><option value="fall">낙상</option><option value="nonfall">비낙상</option></select></label>
+        <label>반복 세트<input id="sets" type="number" value="5" min="1" max="100" required></label>
+        <label>시행 관측 시간 · 초<input id="duration" type="number" value="10" min="1" max="300" step="0.1" required></label>
+      </div>
+      <fieldset><legend>세트별 동작 순서 · 선택한 동작을 아래 순서로 반복합니다</legend><div id="actions"></div></fieldset>
+      <button id="create" type="submit">실험 시작</button>
+      <span class="hint" id="planned"></span>
+    </form>
+  </section>
+
+  <section aria-labelledby="trial-heading">
+    <div class="section-title">
+      <h2 id="trial-heading">현재 시행</h2>
+      <label class="history">저장된 실험<select id="history"><option value="">실험 없음</option></select></label>
+    </div>
+    <div class="trial-title"><strong id="current">실험을 시작해 주세요</strong><span id="phase"></span></div>
+    <progress id="progress" max="100" value="0"></progress>
+    <p id="progress-text" class="hint"></p>
+    <div class="live" aria-live="polite">
+      <div><span>프레임 연결</span><strong id="connection">대기</strong></div>
+      <div><span>현재 응답</span><strong id="fsm">—</strong></div>
+      <div><span>이번 시행 확정</span><strong id="confirmed">—</strong></div>
+      <div><span>경과 시간</span><strong id="elapsed">0.0초</strong></div>
+    </div>
+    <p id="details"></p>
+    <div class="buttons">
+      <button id="start" disabled>시행 시작</button>
+      <button id="end" class="secondary" disabled>시행 종료</button>
+      <button id="next" class="secondary" disabled>다음 시행</button>
+      <button id="finish" class="quiet" disabled>실험 종료</button>
+    </div>
+    <p class="hint">Temi의 기존 낙상 감지 테스트 화면을 열어 두세요. 참가자가 직립 자세로 준비된 뒤 시행 시작을 누릅니다.
+      관측 시간이 만료되면 자동 종료되며, 낙상이 확정돼도 종료 시점까지 기록합니다.</p>
+    <p id="warnings" class="warning"></p>
+    <figure>
+      <img id="preview" alt="현재 시행의 원본 프레임과 관절 오버레이 비교" hidden>
+      <figcaption id="preview-note">FALL_DEBUG=frames로 실행하면 시행별 비교 사진을 확인할 수 있습니다.</figcaption>
+    </figure>
+  </section>
+
+  <section aria-labelledby="review-heading">
+    <h2 id="review-heading">시행 검토</h2>
+    <p class="hint">실제로 수행한 행동과 유효 여부를 확인한 시행만 성능 지표에 포함됩니다.
+      수신 프레임이 없거나 전부 인식 불가였던 시행은 별도 집계됩니다.</p>
+    <form id="review">
+      <div class="fields">
+        <label>시행 선택<select id="review-trial"></select></label>
+        <label>실제 수행 동작<input id="actual-action" maxlength="200" placeholder="예: 전방 모의 낙상 · 손 짚음"></label>
+        <label>실제 정답<select id="actual-fall"><option value="">미확인</option><option value="true">낙상</option><option value="false">비낙상</option></select></label>
+        <label>시행 유효 여부<select id="valid"><option value="">미검토</option><option value="true">유효</option><option value="false">무효</option></select></label>
+      </div>
+      <label>메모<input id="notes" maxlength="1000" placeholder="잘못 수행한 동작, 가림, 연결 문제 등"></label>
+      <button id="save-review" type="submit" disabled>검토 결과 저장</button>
+    </form>
+    <div class="table-scroll"><table>
+      <thead><tr><th>시행</th><th>세트</th><th>계획 동작</th><th>상태</th><th>판정</th><th>유효 관절 / 수신</th><th>검토</th></tr></thead>
+      <tbody id="trials"></tbody>
+    </table></div>
+  </section>
+
+  <section aria-labelledby="results-heading">
+    <h2 id="results-heading">누적 결과 · 저장된 전체 참가자</h2>
+    <div id="metrics" class="metrics"></div>
+    <p id="excluded" class="hint"></p>
+    <div class="table-scroll"><table>
+      <thead><tr><th>계획 동작</th><th>종료 시행</th><th>확정 있음</th><th>확정 없음</th><th>검토·관절 유효</th></tr></thead>
+      <tbody id="groups"></tbody>
+    </table></div>
+    <p class="hint">확정 없음에는 미감지 시행과 미검토 시행이 함께 표시됩니다. TP·FN·FP·TN은 실험자가 확인한 실제 정답으로 계산합니다.
+      최초 확정까지의 시간은 시행 시작 기준이며 실제 낙상 발생 시점 기준 지연과는 다릅니다.</p>
+  </section>
+</main>
+</body>
+</html>
