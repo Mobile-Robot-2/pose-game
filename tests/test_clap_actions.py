@@ -5,6 +5,15 @@ from test_rhythm_actions import pose
 
 
 class ClapActionsTest(unittest.TestCase):
+    def test_clap_with_slight_wrist_gap_is_one_event(self):
+        detector = ClapDetector()
+        shoulders = ((.6, .4), (.4, .4))
+        separated = pose(*shoulders, (.7, .6), (.3, .6))
+        near = pose(*shoulders, (.57, .6), (.43, .6))
+        self.assertFalse(detector.update(separated, 0))
+        self.assertTrue(detector.update(near, .2))
+        self.assertFalse(detector.update(near, .4))
+
     def test_clap_emits_once_on_contact_and_rearms_after_separation(self):
         detector = ClapDetector()
         shoulders = ((.6, .4), (.4, .4))

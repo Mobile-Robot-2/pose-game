@@ -8,6 +8,21 @@ COUNT_COOLDOWN_SECONDS = 0.8
 
 ACTION_NAMES = ("LEFT_HAND_UP", "RIGHT_HAND_UP", "ARMS_OPEN", "CLAP")
 
+
+def classify_actions(actions, *, pose_detected=True):
+    """Return an unbiased experiment prediction and its reason."""
+    if not pose_detected:
+        return None, "pose_not_detected"
+    candidates = set(actions)
+    if "ARMS_OPEN" in candidates and "CLAP" in candidates:
+        return None, "conflict"
+    for action in ("ARMS_OPEN", "CLAP"):
+        if action in candidates:
+            return action, "detected"
+    if len(candidates) == 1:
+        return next(iter(candidates)), "detected"
+    return None, "conflict" if candidates else "no_action"
+
 ACTION_TIMELINE = [
     {"start": 0.0, "end": 5.0, "action": "LEFT_HAND_UP", "score": 10},
     {"start": 5.0, "end": 10.0, "action": "RIGHT_HAND_UP", "score": 10},
@@ -21,8 +36,10 @@ LEFT_ELBOW = 13
 RIGHT_ELBOW = 14
 LEFT_WRIST = 15
 RIGHT_WRIST = 16
+LEFT_INDEX = 19
+RIGHT_INDEX = 20
 
-MIN_RAISE_MARGIN_Y = 0.08
+MIN_RAISE_MARGIN_Y = 0.02
 ARMS_OPEN_Y_TOLERANCE = 0.28
 MIN_SHOULDER_WIDTH = 0.10
 
@@ -42,20 +59,31 @@ def _shoulder_width(landmarks) -> float:
     return max(width, MIN_SHOULDER_WIDTH)
 
 
-def is_left_hand_up(landmarks) -> bool:
-    if not _visibility_ok(landmarks, (LEFT_SHOULDER, LEFT_WRIST)):
+def _is_hand_up(landmarks, shoulder_index, wrist_index, finger_index) -> bool:
+    if not _visibility_ok(landmarks, (shoulder_index, wrist_index)):
         return False
-    left_shoulder = landmarks[LEFT_SHOULDER]
-    left_wrist = landmarks[LEFT_WRIST]
-    return left_wrist.y < left_shoulder.y - MIN_RAISE_MARGIN_Y
+    shoulder, wrist = landmarks[shoulder_index], landmarks[wrist_index]
+    if wrist.y < shoulder.y - MIN_RAISE_MARGIN_Y:
+        return True
+    if len(landmarks) <= finger_index or not _visibility_ok(landmarks, (finger_index,)):
+        return False
+    finger = landmarks[finger_index]
+    return (
+        wrist.y < shoulder.y + 0.04
+        and finger.y < shoulder.y - 0.08
+        and 0 <= wrist.x <= 1 and 0 <= wrist.y <= 1
+        and 0 <= finger.x <= 1 and 0 <= finger.y <= 1
+        and 0 < wrist.y - finger.y <= 0.25
+        and abs(wrist.x - finger.x) <= _shoulder_width(landmarks)
+    )
+
+
+def is_left_hand_up(landmarks) -> bool:
+    return _is_hand_up(landmarks, LEFT_SHOULDER, LEFT_WRIST, LEFT_INDEX)
 
 
 def is_right_hand_up(landmarks) -> bool:
-    if not _visibility_ok(landmarks, (RIGHT_SHOULDER, RIGHT_WRIST)):
-        return False
-    right_shoulder = landmarks[RIGHT_SHOULDER]
-    right_wrist = landmarks[RIGHT_WRIST]
-    return right_wrist.y < right_shoulder.y - MIN_RAISE_MARGIN_Y
+    return _is_hand_up(landmarks, RIGHT_SHOULDER, RIGHT_WRIST, RIGHT_INDEX)
 
 
 def is_arms_open(landmarks) -> bool:
@@ -111,7 +139,7 @@ def is_clap(landmarks) -> bool:
     wrist_y_distance = abs(left_wrist.y - right_wrist.y)
 
     return (
-        wrist_distance <= shoulder_width * 0.65
+        wrist_distance <= shoulder_width * 0.75
         and wrist_y_distance <= shoulder_width * 0.55
     )
 
@@ -172,7 +200,9 @@ class ActionCounter:
         self.counts = {action: 0 for action in ACTION_NAMES}
         self.action_active = {action: False for action in ACTION_NAMES}
         self.action_armed = {action: False for action in ACTION_NAMES}
-        self.last_count_time = {action: 0.0 for action in ACTION_NAMES}
+        # ClapDetector emits an event rather than a continuously held pose.
+        self.action_armed["CLAP"] = True
+        self.last_count_time = {action: float("-inf") for action in ACTION_NAMES}
         self.scored_segments = set()
         self.total_pose_score = 0
         self.start_time = time.monotonic()
