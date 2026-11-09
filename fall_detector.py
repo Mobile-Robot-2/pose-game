@@ -9,6 +9,10 @@ LEFT_SHOULDER = 11
 RIGHT_SHOULDER = 12
 LEFT_HIP = 23
 RIGHT_HIP = 24
+LEFT_KNEE = 25
+RIGHT_KNEE = 26
+LEFT_ANKLE = 27
+RIGHT_ANKLE = 28
 
 MIN_LANDMARK_VISIBILITY = 0.5
 
@@ -36,6 +40,17 @@ LOW_HEAD_Y = 0.36
 LOW_HIP_Y = 0.55
 LOW_SHOULDER_Y = 0.42
 BODY_CENTER_LOW_Y = 0.50
+# [①] 낙상 확정에 요구하는 '상체 전체가 바닥까지 내려감' 기준 (테미 실측 보정).
+# 머리·어깨·골반 평균(body_center_y)이 단일 관절보다 분리력이 크다:
+#   테미 실측 — 진짜 낙상 ≥0.528, 쭈그림/줍기 오탐 ≤0.512 (간격 ~0.016).
+# 낙상은 상체 전체가 내려가지만 쭈그림은 골반만 내려가고 머리·어깨는 덜 내려가 평균에서 갈린다.
+CONFIRM_CENTER_Y = 0.52
+# [②] 낙상다운 '하강 낙폭' 하한. 테미 실측 — 낙상 center_drop ≥0.258, 쭈그림/줍기 ≤0.214.
+# 의심 구간 중 최대 낙폭(peak)이 이 값 미만이면 '천천히 내려온 것'으로 보고 확정하지 않는다.
+CONFIRM_MIN_DROP = 0.23
+# (아래는 로그/참고용 보조 임계)
+CONFIRM_SHOULDER_Y = 0.49
+CONFIRM_HIP_Y = 0.64
 MIN_UPPER_BODY_VISIBILITY = 0.50
 MIN_RELIABLE_UPPER_BODY_VISIBILITY = 0.55
 
@@ -60,6 +75,10 @@ class FallDetector:
         self.last_observation_time = None
         self.missing_pose_pending = False
         self.fall_posture_seen = False
+        self._prev_center_y = None      # [측정] 직전 프레임 몸중심 (순간 낙폭용)
+        self._last_frame_drop = 0.0     # [측정] 직전→현재 몸중심 변화(+가 하강)
+        self._episode_peak_drop = 0.0   # [②] 의심 구간 중 최대 하강 낙폭
+        self._episode_base_center = 0.0 # [②] 의심 시작 시점의 기준(선 자세) 몸중심
         self.last_metrics = self._empty_metrics()
         return self.get_state()
 
@@ -88,6 +107,10 @@ class FallDetector:
 
         self.last_observation_time = now
         self.last_metrics = metrics
+        # [측정] 직전 프레임 대비 순간 낙폭(하강 속도 proxy). 미검출/관찰끊김 뒤엔 prev 없음.
+        cur_center = metrics["body_center_y"]
+        self._last_frame_drop = (cur_center - self._prev_center_y) if self._prev_center_y is not None else 0.0
+        self._prev_center_y = cur_center
         self._new_event = False
 
         in_frame = all(
@@ -120,6 +143,10 @@ class FallDetector:
                     or (in_frame and metrics["body_center_y"] >= BODY_CENTER_LOW_Y)
                 )
             )
+        # [①] 테미 실측 보정: 확정은 '상체 전체(머리+어깨+골반 평균)가 충분히 내려감'을 요구한다.
+        # body_center_y≥0.52 일 때만 확정. 깊은 쭈그림/줍기는 골반만 내려가고 머리·어깨가
+        # 덜 내려가 평균이 0.512를 못 넘어 차단된다. (torso 수평은 요구 안 함 — 테미 낙상도 40°↓)
+        low_fall_pose = low_fall_pose and (metrics["body_center_y"] >= CONFIRM_CENTER_Y)
         if self.missing_pose_pending:
             self.missing_pose_pending = False
             resumed = in_frame and low_fall_pose and not upright_pose
@@ -167,6 +194,11 @@ class FallDetector:
                 self.last_evidence_time = now
                 self.low_pose_since = now if low_fall_pose else None
                 self.recovered_since = None
+                # [②] 의심 시작 시점의 '선 자세' 몸중심을 기준선으로 고정(만료 안 됨).
+                # center_drop = 현재중심 − 최근 upright중심 이므로, 기준선 = 현재중심 − center_drop.
+                self._episode_base_center = metrics["body_center_y"] - metrics["center_drop"]
+                self._episode_peak_drop = metrics["center_drop"]
+                self._log_case("SUSPECT", metrics)  # [0단계]
             elif (
                 self.recovered_since is not None
                 and now - self.recovered_since >= RECOVERED_DISPLAY_SECONDS
@@ -175,19 +207,27 @@ class FallDetector:
                 self.recovered_since = None
 
         elif self.status == "FALL_SUSPECTED":
+            # [②] 기준선(선 자세) 대비 현재 총 하강폭의 최대값을 누적 (2단계 붕괴도 포착).
+            self._episode_peak_drop = max(
+                self._episode_peak_drop,
+                metrics["body_center_y"] - self._episode_base_center,
+            )
             if fall_motion or low_fall_pose:
                 self.last_evidence_time = now
             if low_fall_pose:
                 if self.low_pose_since is None:
                     self.low_pose_since = now
                 elif (now - self.low_pose_since >= FALL_CONFIRM_SECONDS
-                      and (not self.require_fall_posture or self.fall_posture_seen)):
+                      and (not self.require_fall_posture or self.fall_posture_seen)
+                      and self._episode_peak_drop >= CONFIRM_MIN_DROP):  # [②] 낙상다운 급하강 필수
                     self.status = "FALL_CONFIRMED"
                     self.recovery_since = None
                     self._create_event()
+                    self._log_case("CONFIRM", metrics)  # [0단계]
             else:
                 self.low_pose_since = None
                 if upright_pose or now - self.last_evidence_time > EVIDENCE_GRACE_SECONDS:
+                    self._log_case("REJECT", metrics)  # [0단계]
                     self.status = "NORMAL"
 
         elif self.status == "FALL_CONFIRMED":
@@ -253,6 +293,8 @@ class FallDetector:
         self.fall_posture_seen = False
         self.low_pose_since = None
         self.recovery_since = None
+        self._prev_center_y = None  # [측정] 관찰 끊기면 순간 낙폭 기준도 초기화
+        self._episode_peak_drop = 0.0  # [②] 관찰 끊기면 하강 낙폭 누적도 초기화
         if self.status == "FALL_SUSPECTED":
             self.status = "NORMAL"
 
@@ -391,6 +433,24 @@ class FallDetector:
         center_drop = max(0.0, body_center_y - previous_center_y)
         sudden_drop = center_drop >= MIN_CENTER_DROP
 
+        # [0단계 검증] 다리(무릎·발목)로 '다리 폄(누움) vs 접힘(쭈그림)' 판별 가능성 측정.
+        # FSM 판정엔 아직 쓰지 않고 로그로만 확인한다.
+        n = len(landmarks)
+        left_knee = landmarks[LEFT_KNEE] if n > LEFT_KNEE else None
+        right_knee = landmarks[RIGHT_KNEE] if n > RIGHT_KNEE else None
+        left_ankle = landmarks[LEFT_ANKLE] if n > LEFT_ANKLE else None
+        right_ankle = landmarks[RIGHT_ANKLE] if n > RIGHT_ANKLE else None
+        knee_vis = round((self._vis(left_knee) + self._vis(right_knee)) / 2, 2)
+        ankle_vis = round((self._vis(left_ankle) + self._vis(right_ankle)) / 2, 2)
+        knee_angles = []
+        for h, k, a in ((left_hip, left_knee, left_ankle), (right_hip, right_knee, right_ankle)):
+            if k is not None and a is not None and self._is_visible(k) and self._is_visible(a):
+                ang = self._joint_angle(h, k, a)
+                if ang is not None:
+                    knee_angles.append(ang)
+        legs_visible = len(knee_angles) > 0
+        knee_angle = round(sum(knee_angles) / len(knee_angles), 1) if knee_angles else None
+
         return {
             "torso_angle": round(torso_angle, 1),
             "center_drop": round(center_drop, 3),
@@ -405,8 +465,14 @@ class FallDetector:
             "reliable_upper_body_visible": reliable_upper_body_visible,
             "upper_body_low": upper_body_low,
             "low_position": low_position,
+            "hips_on_floor": CONFIRM_HIP_Y <= hip_y <= 1.0,  # [①] 골반이 바닥까지 내려감
+            "shoulder_low": CONFIRM_SHOULDER_Y <= shoulder_y <= 1.0,  # [①] 어깨(상체)까지 내려감
             "sudden_drop": sudden_drop,
             "rapid_drop": sudden_drop,
+            "legs_visible": legs_visible,
+            "knee_angle": knee_angle,
+            "knee_vis": knee_vis,
+            "ankle_vis": ankle_vis,
         }, upright_pose
 
     def _confidence(self) -> float:
@@ -439,6 +505,40 @@ class FallDetector:
         return visibility >= MIN_LANDMARK_VISIBILITY
 
     @staticmethod
+    def _vis(landmark) -> float:
+        """[0단계] landmark visibility(없거나 None이면 0으로)."""
+        if landmark is None:
+            return 0.0
+        return float(getattr(landmark, "visibility", 1.0))
+
+    @staticmethod
+    def _joint_angle(a, b, c):
+        """[0단계] b에서의 내각(a-b-c), 도 단위. 다리 폄≈180°, 접힘<120°. 계산 불가 시 None."""
+        v1x, v1y = a.x - b.x, a.y - b.y
+        v2x, v2y = c.x - b.x, c.y - b.y
+        n1 = math.hypot(v1x, v1y)
+        n2 = math.hypot(v2x, v2y)
+        if n1 < 1e-6 or n2 < 1e-6:
+            return None
+        cos = (v1x * v2x + v1y * v2y) / (n1 * n2)
+        cos = max(-1.0, min(1.0, cos))
+        return math.degrees(math.acos(cos))
+
+    def _log_case(self, tag: str, metrics: dict) -> None:
+        """[0단계 검증] 상태 전이 시점의 자세·다리 신호를 한 줄로 출력(판정엔 무관)."""
+        print(
+            f"fall_dbg[{tag}] "
+            f"hip_y={metrics['hip_y']} torso_angle={metrics['torso_angle']} "
+            f"horizontal={metrics['horizontal']} upper_body_low={metrics['upper_body_low']} "
+            f"head_y={metrics['head_y']} shoulder_y={metrics['shoulder_y']} "
+            f"legs_visible={metrics['legs_visible']} knee_angle={metrics['knee_angle']} "
+            f"knee_vis={metrics['knee_vis']} ankle_vis={metrics['ankle_vis']} "
+            f"body_center_y={metrics['body_center_y']} center_drop={metrics['center_drop']} "
+            f"frame_drop={self._last_frame_drop:+.3f} peak_drop={self._episode_peak_drop:.3f} "
+            f"sudden_drop={metrics['sudden_drop']}"
+        )
+
+    @staticmethod
     def _empty_metrics() -> dict:
         return {
             "torso_angle": 0.0,
@@ -454,6 +554,12 @@ class FallDetector:
             "reliable_upper_body_visible": False,
             "upper_body_low": False,
             "low_position": False,
+            "hips_on_floor": False,
+            "shoulder_low": False,
             "sudden_drop": False,
             "rapid_drop": False,
+            "legs_visible": False,
+            "knee_angle": None,
+            "knee_vis": 0.0,
+            "ankle_vis": 0.0,
         }
