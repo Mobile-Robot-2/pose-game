@@ -164,9 +164,27 @@ class ClapDetector:
 
     def reset(self):
         self.contact = False
+        self.armed = False
         self.last_seen = None
 
     def update(self, landmarks, timestamp: float) -> bool:
+        # Partial tracking can arm a possible separation but cannot trigger a clap.
+        if landmarks and len(landmarks) > RIGHT_WRIST and _visibility_ok(
+                landmarks, (LEFT_SHOULDER, RIGHT_SHOULDER)):
+            left, right = landmarks[LEFT_WRIST], landmarks[RIGHT_WRIST]
+            inside = lambda p: 0 <= p.x <= 1 and 0 <= p.y <= 1
+            visible = lambda p: inside(p) and getattr(p, "visibility", 1.0) >= 0.35
+            separated_at_edge = (
+                (visible(left) and not visible(right))
+                or (visible(right) and not visible(left))
+            ) and math.hypot(left.x - right.x, left.y - right.y) / _shoulder_width(landmarks) >= 0.9
+            if separated_at_edge:
+                if self.last_seen is not None and (timestamp <= self.last_seen or timestamp - self.last_seen > 1.0):
+                    self.reset()
+                self.last_seen = timestamp
+                self.contact = False
+                self.armed = True
+                return False
         if (not landmarks or len(landmarks) <= RIGHT_WRIST
                 or not _visibility_ok(landmarks, (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_WRIST, RIGHT_WRIST))):
             if self.last_seen is not None and timestamp - self.last_seen > 1.0:
@@ -186,8 +204,10 @@ class ClapDetector:
         distance = math.hypot(left.x - right.x, left.y - right.y) / _shoulder_width(landmarks)
         if distance >= 0.9:
             self.contact = False
-        elif not self.contact and is_clap(landmarks):
+            self.armed = True
+        elif self.armed and not self.contact and is_clap(landmarks):
             self.contact = True
+            self.armed = False
             return True
         return False
 
