@@ -75,6 +75,7 @@ class AnalyzeVideoTest(unittest.TestCase):
         self.assertEqual(FakeAnalyzer.timestamps, [0, 400, 800, 1200])
         self.assertEqual(rows[0]["current_actions"], "LEFT_HAND_UP|RIGHT_HAND_UP")
         self.assertEqual(rows[0]["detected_action"], "")
+        self.assertEqual(rows[0]["prediction_status"], "conflict")
         with self.assertRaises(FileExistsError):
             analyze_video(self.video, "rhythm", output)
 

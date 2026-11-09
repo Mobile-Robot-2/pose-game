@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
+from action_counter import classify_actions
 from experiment_manager import (
     ExperimentConflict, ExperimentManager, FALL_ACTIONS, NONFALL_ACTIONS, csv_text,
 )
@@ -95,9 +96,10 @@ def _analyze_locked(mode, session_id, image_bytes, *, diagnostics=None):
             return {"detected": True, "fall_status": state["fall_status"],
                     "fall_detected": state["fall_detected"], "fall_metrics": state["fall_metrics"],
                     "landmarks": landmarks}
-        actions = [name for name, detected in result["detections"].items() if detected]
+        actions = [name for name, detected in result.get("raw_detections", result["detections"]).items() if detected]
+        prediction, prediction_status = classify_actions(actions, pose_detected=result["detected"])
         return {"detected": result["detected"], "current_actions": actions,
-                "detected_action": actions[0] if len(actions) == 1 else None, "landmarks": landmarks}
+                "detected_action": prediction, "prediction_status": prediction_status, "landmarks": landmarks}
 
 
 def _record_fall_state(diagnostics, state):

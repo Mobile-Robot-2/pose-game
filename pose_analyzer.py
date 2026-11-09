@@ -66,11 +66,13 @@ class PoseAnalyzer:
         landmarks = result.pose_landmarks[0]
         detections = detect_actions(landmarks)
         detections["CLAP"] = self.clap_detector.update(landmarks, timestamp_ms / 1000)
+        raw_detections = dict(detections)
         if detections["CLAP"]:
             detections = {action: action == "CLAP" for action in ACTION_NAMES}
         return {
             "detected": True,
             "detections": detections,
+            "raw_detections": raw_detections,
             "landmarks": landmarks,
         }
 

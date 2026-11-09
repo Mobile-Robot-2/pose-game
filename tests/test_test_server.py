@@ -44,6 +44,25 @@ class TestSessions(unittest.TestCase):
             test_server.analyze("fall", "one", b"")
 
     @patch.object(test_server, "PoseAnalyzer", FakeAnalyzer)
+    def test_raw_candidates_and_conflicts_are_reported(self):
+        raw = {"LEFT_HAND_UP": True, "ARMS_OPEN": True, "CLAP": True}
+        with patch.object(FakeAnalyzer, "analyze_image_bytes", return_value={
+                "detected": True, "landmarks": [], "detections": {"CLAP": True}, "raw_detections": raw}):
+            result = test_server.analyze("rhythm", "one", b"image")
+        self.assertEqual(result["current_actions"], list(raw))
+        self.assertIsNone(result["detected_action"])
+        self.assertEqual(result["prediction_status"], "conflict")
+
+    @patch.object(test_server, "PoseAnalyzer", FakeAnalyzer)
+    def test_open_arms_wins_over_hand_raises(self):
+        raw = {"LEFT_HAND_UP": True, "RIGHT_HAND_UP": True, "ARMS_OPEN": True, "CLAP": False}
+        with patch.object(FakeAnalyzer, "analyze_image_bytes", return_value={
+                "detected": True, "landmarks": [], "detections": raw}):
+            result = test_server.analyze("rhythm", "one", b"image")
+        self.assertEqual(result["detected_action"], "ARMS_OPEN")
+        self.assertEqual(result["prediction_status"], "detected")
+
+    @patch.object(test_server, "PoseAnalyzer", FakeAnalyzer)
     def test_landmarks_are_returned_and_empty_when_pose_is_lost(self):
         point = types.SimpleNamespace(x=0.2, y=0.4, visibility=0.8)
         with patch.object(FakeAnalyzer, "analyze_image_bytes", return_value={
