@@ -103,26 +103,40 @@ class FallDetector:
         strong_horizontal = (
             metrics["torso_angle"] >= STRONG_HORIZONTAL_ANGLE_DEGREES
         )
+        # [수정] 낙상 확정 자세 = '몸통(또는 상체) 수평' AND '골반이 바닥까지 내려감'.
+        #  - 빠른 앉기/스쿼트: 골반은 낮아도 몸통이 수직 → horizontal 불충족 → 제외
+        #  - 물건 줍기/허리 숙임: 몸통은 수평이어도 서 있어 골반이 높음 → hips_low 불충족 → 제외
+        #  - 실제 낙상: 둘 다 충족 → 확정
+        _ = strong_horizontal  # (예전 fallen_pose 분기 흔적; 현재 미사용)
         fallen_pose = (
             metrics["reliable_upper_body_visible"]
             and metrics["horizontal"]
-            and (
-                metrics["low_position"]
-                or (strong_horizontal and metrics["upper_body_low"])
-            )
+            and metrics["hips_low"]
         )
         obvious_lying_pose = (
             metrics["reliable_upper_body_visible"]
             and metrics["upper_body_horizontal"]
             and metrics["upper_body_low"]
+            and metrics["hips_low"]
         )
         low_fall_pose = fallen_pose or obvious_lying_pose
         if self.status == "FALL_SUSPECTED":
+            # 유지(확정) 단계의 추가 경로. 핵심은 '골반이 바닥(hips_low)'을 항상 요구해
+            # 물건 줍기/허리 숙임(서 있어 골반 높음)을 배제하는 것.
+            # 그 위에서 '정면 낙상'(상체가 숙여졌거나 머리가 어깨 아래로 내려감)을 인정한다.
+            #   - 상체각(upper_body_angle)≥40: 머리-어깨가 숙여진 전형적 낙상 중간자세
+            #   - 또는 몸 중심이 낮고 '머리가 어깨 아래로'(head_y≥shoulder_y): 정면으로 주저앉듯 쓰러짐
+            # 빠른 앉기/스쿼트는 몸통이 수직이고 머리가 어깨 위(head_y<shoulder_y)라 둘 다 불충족 → 제외.
             low_fall_pose = low_fall_pose or (
-                metrics["upper_body_low"]
+                metrics["hips_low"]
+                and metrics["upper_body_low"]
                 and (
                     metrics["upper_body_angle"] >= UPPER_BODY_LOW_HOLD_ANGLE_DEGREES
-                    or (in_frame and metrics["body_center_y"] >= BODY_CENTER_LOW_Y)
+                    or (
+                        in_frame
+                        and metrics["body_center_y"] >= BODY_CENTER_LOW_Y
+                        and metrics["head_y"] >= metrics["shoulder_y"]
+                    )
                 )
             )
         if self.missing_pose_pending:
@@ -182,6 +196,7 @@ class FallDetector:
             else:
                 self.low_pose_since = None
                 if upright_pose or now - self.last_evidence_time > EVIDENCE_GRACE_SECONDS:
+                    self._log_fall_reject(now, metrics)  # [진단]
                     self.status = "NORMAL"
 
         elif self.status == "FALL_CONFIRMED":
@@ -324,7 +339,22 @@ class FallDetector:
             f"head_hip_ratio={head_hip_ratio:+.2f} "
             f"dz_nose={dz_nose:+.3f} dz_shoulder={dz_shoulder:+.3f} "
             f"nose_z0={base['nose_z']:+.3f} nose_z1={current['nose_z']:+.3f} "
-            f"sh_z0={base['shoulder_z']:+.3f} sh_z1={current['shoulder_z']:+.3f}"
+            f"sh_z0={base['shoulder_z']:+.3f} sh_z1={current['shoulder_z']:+.3f} "
+            f"| torso_angle={self.last_metrics['torso_angle']} hip_y={self.last_metrics['hip_y']} "
+            f"horizontal={self.last_metrics['horizontal']} hips_low={self.last_metrics['hips_low']}"
+        )
+
+    def _log_fall_reject(self, now: float, metrics: dict) -> None:
+        """[진단] SUSPECTED 에서 확정되지 못하고 NORMAL 로 복귀할 때의 자세값.
+
+        빠른 앉기/스쿼트(몸통 수직)·물건 줍기(골반 높음)가 올바르게 걸러졌는지
+        torso_angle·hip_y 로 확인하는 기록 전용 로그(FSM 판정엔 무관).
+        """
+        print(
+            "fall_reject_debug "
+            f"torso_angle={metrics['torso_angle']} hip_y={metrics['hip_y']} "
+            f"horizontal={metrics['horizontal']} upper_body_horizontal={metrics['upper_body_horizontal']} "
+            f"hips_low={metrics['hips_low']} upper_body_low={metrics['upper_body_low']}"
         )
 
     def get_state(self) -> dict:
@@ -457,6 +487,8 @@ class FallDetector:
             "reliable_upper_body_visible": reliable_upper_body_visible,
             "upper_body_low": upper_body_low,
             "low_position": low_position,
+            # [수정] 골반이 바닥까지 내려갔는가(낙상 vs 줍기 구분 핵심). 화면 밖(>1.0)은 제외.
+            "hips_low": LOW_HIP_Y <= hip_y <= 1.0,
             "sudden_drop": sudden_drop,
             "rapid_drop": sudden_drop,
         }, upright_pose
@@ -506,6 +538,7 @@ class FallDetector:
             "reliable_upper_body_visible": False,
             "upper_body_low": False,
             "low_position": False,
+            "hips_low": False,
             "sudden_drop": False,
             "rapid_drop": False,
         }
