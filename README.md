@@ -84,6 +84,24 @@ python -m uvicorn server:app --host 0.0.0.0 --port 8000
 
 테스트 화면의 동작과 제한은 [TESTING.md](TESTING.md)를 참고하세요.
 
+## Temi 낙상 감지 사진과 로그 저장
+
+Temi 카메라가 서버로 전송한 낙상 분석 프레임을 사진과 CSV로 저장하려면, 가상환경이 활성화된 **PowerShell**에서 `pose-game` 폴더로 이동한 뒤 다음 명령을 실행하세요.
+
+```powershell
+$env:FALL_DEBUG = "frames"
+python -m uvicorn server:app --host 0.0.0.0 --port 8000
+```
+
+Temi 앱이 이 서버의 `/analyze` 또는 `/analyze_frame`으로 카메라 프레임을 보내면 `data/fall_debug/<실행별 폴더>/`에 다음 파일이 저장됩니다. 위 서비스 서버를 사용하려면 `firebase-key.json`이 필요합니다.
+
+- `frame-000001.jpg` 등 — 왼쪽에 서버가 받은 원본 프레임, 오른쪽에 관절과 신체 중심을 표시한 비교 사진이 저장됩니다. 아래쪽에는 낙상 상태와 판정 수치가 표시됩니다.
+- `frames.csv` — 프레임별 관절 좌표, 하강량, 기울기, 낙상 판정과 관측 초기화 사유가 기록됩니다.
+
+낙상 감지 테스트 화면의 `/test/fall` 요청을 기록하려면 두 번째 명령을 `python -m uvicorn test_server:app --host 0.0.0.0 --port 8000`으로 바꾸세요. 테스트 서버는 Firebase 키 없이 사용할 수 있습니다.
+
+사진은 낙상 확정 여부와 관계없이 수신·분석한 프레임에서 저장되며, 저장 폴더는 서버를 실행할 때마다 새로 만들어집니다. 사진 없이 CSV만 저장하려면 `$env:FALL_DEBUG = "csv"`로 설정한 뒤 서버를 실행하세요. `data/`는 Git에서 제외됩니다.
+
 ## 저장한 영상 분석
 
 Temi 등으로 촬영한 영상 한 개를 노트북에서 분석할 수 있습니다. 예를 들어 `data/videos` 폴더를 만들고 그 안에 영상을 저장하세요. 이 폴더와 분석 결과가 저장되는 `data` 폴더는 Git에 올라가지 않습니다. 다른 위치의 영상도 경로를 직접 지정해 분석할 수 있습니다.
