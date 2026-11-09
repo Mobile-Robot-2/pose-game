@@ -16,13 +16,16 @@ from pose_analyzer import PoseAnalyzer
 FIELDS = (
     "video", "mode", "frame", "video_time_seconds", "sample_interval_seconds", "pose_detected",
     "fall_status", "fall_detected", "fall_event", "torso_angle", "center_drop",
-    "current_actions", "detected_action", "prediction_status",
+    "current_actions", "detected_action", "prediction_status", "fall_confirmation_policy",
 )
 
 
-def analyze_video(video_path: Path, mode: str, output_path: Path, interval: float = 0.2) -> int:
+def analyze_video(video_path: Path, mode: str, output_path: Path, interval: float = 0.2,
+                  require_fall_posture: bool = False) -> int:
     if mode not in ("fall", "rhythm"):
         raise ValueError("Mode must be fall or rhythm.")
+    if require_fall_posture and mode != "fall":
+        raise ValueError("Posture evidence policy is only available for fall analysis.")
     if not math.isfinite(interval) or interval < 0.001:
         raise ValueError("Frame interval must be at least 0.001 seconds.")
     if not video_path.is_file():
@@ -39,7 +42,7 @@ def analyze_video(video_path: Path, mode: str, output_path: Path, interval: floa
         if not math.isfinite(fps) or fps <= 0:
             raise ValueError("Could not determine video FPS.")
         analyzer = PoseAnalyzer()
-        detector = FallDetector() if mode == "fall" else None
+        detector = FallDetector(require_fall_posture=require_fall_posture) if mode == "fall" else None
         output_path.parent.mkdir(parents=True, exist_ok=True)
         processed = 0
         next_sample = 0.0
@@ -65,6 +68,8 @@ def analyze_video(video_path: Path, mode: str, output_path: Path, interval: floa
                        "video_time_seconds": round(timestamp, 3), "sample_interval_seconds": interval,
                        "pose_detected": analysis["detected"]}
                 if mode == "fall":
+                    row["fall_confirmation_policy"] = (
+                        "posture_experimental" if require_fall_posture else "baseline")
                     state = (detector.update(analysis["landmarks"], timestamp=timestamp)
                              if analysis["detected"] else detector.update_no_pose(timestamp=timestamp))
                     metrics = state["fall_metrics"]
@@ -96,13 +101,15 @@ def main() -> None:
     parser.add_argument("video", type=Path, help="Path to a constant-frame-rate video")
     parser.add_argument("--interval", type=float, help="Minimum sampling interval in seconds (fall: 0.2, rhythm: 0.1)")
     parser.add_argument("--output", type=Path, help="CSV output path; existing files are not overwritten")
+    parser.add_argument("--require-fall-posture", action="store_true",
+                        help="Experimental fall policy; can miss falls and is for comparison only")
     args = parser.parse_args()
     output = args.output or Path("data/video_analysis") / (
         f"{args.video.stem}_{args.mode}_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}.csv"
     )
     try:
         interval = args.interval if args.interval is not None else (0.1 if args.mode == "rhythm" else 0.2)
-        count = analyze_video(args.video, args.mode, output, interval)
+        count = analyze_video(args.video, args.mode, output, interval, args.require_fall_posture)
     except (ValueError, OSError, RuntimeError) as exc:
         parser.exit(1, f"Analysis failed: {exc}\n")
     print(f"Analyzed frames: {count}\nResult CSV: {output.resolve()}")
