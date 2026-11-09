@@ -2,6 +2,8 @@ import sys
 import types
 import unittest
 from unittest.mock import patch
+from pathlib import Path
+import tempfile
 
 # The test exercises session logic without requiring a camera or MediaPipe runtime.
 fake_pose = types.ModuleType("pose_analyzer")
@@ -9,6 +11,8 @@ fake_pose.PoseAnalyzer = object
 sys.modules.setdefault("pose_analyzer", fake_pose)
 
 import test_server
+from rhythm_trials import RhythmTrials
+from experiment_manager import ExperimentManager
 
 
 class FakeAnalyzer:
@@ -42,6 +46,72 @@ class TestSessions(unittest.TestCase):
     def test_empty_image_rejected(self):
         with self.assertRaises(ValueError):
             test_server.analyze("fall", "one", b"")
+
+    @patch.object(test_server, "PoseAnalyzer", FakeAnalyzer)
+    def test_raw_candidates_and_conflicts_are_reported(self):
+        raw = {"LEFT_HAND_UP": True, "ARMS_OPEN": True, "CLAP": True}
+        with patch.object(FakeAnalyzer, "analyze_image_bytes", return_value={
+                "detected": True, "landmarks": [], "detections": {"CLAP": True}, "raw_detections": raw}):
+            result = test_server.analyze("rhythm", "one", b"image")
+        self.assertEqual(result["current_actions"], list(raw))
+        self.assertIsNone(result["detected_action"])
+        self.assertEqual(result["prediction_status"], "conflict")
+
+    @patch.object(test_server, "PoseAnalyzer", FakeAnalyzer)
+    def test_open_arms_wins_over_hand_raises(self):
+        raw = {"LEFT_HAND_UP": True, "RIGHT_HAND_UP": True, "ARMS_OPEN": True, "CLAP": False}
+        with patch.object(FakeAnalyzer, "analyze_image_bytes", return_value={
+                "detected": True, "landmarks": [], "detections": raw}):
+            result = test_server.analyze("rhythm", "one", b"image")
+        self.assertEqual(result["detected_action"], "ARMS_OPEN")
+        self.assertEqual(result["prediction_status"], "detected")
+
+    @patch.object(test_server, "PoseAnalyzer", FakeAnalyzer)
+    def test_rhythm_trial_routes_capture_frame_and_save(self):
+        with tempfile.TemporaryDirectory(dir="data") as directory, \
+                patch.object(test_server, "rhythm_trials", RhythmTrials(Path(directory) / "trials.csv")):
+            test_server.analyze("rhythm", "temi", b"image")
+            trial = test_server.start_rhythm_trial(test_server.RhythmTrialStart(
+                participant_id="P01", actual_action="LEFT_HAND_UP", trial_number=1))
+            with patch.object(FakeAnalyzer, "analyze_image_bytes", return_value={
+                    "detected": True, "landmarks": [], "detections": {"LEFT_HAND_UP": True}}):
+                test_server.analyze("rhythm", "temi", b"image")
+            result = test_server.end_rhythm_trial(test_server.RhythmTrialEnd(trial_id=trial["trial_id"]))
+            self.assertEqual(result["actual_action"], "LEFT_HAND_UP")
+            self.assertEqual(result["detected_action"], "LEFT_HAND_UP")
+            self.assertTrue(test_server.rhythm_trials.path.is_file())
+
+    def test_fall_dashboard_rejects_new_session_during_trial(self):
+        class DiagnosticAnalyzer(FakeAnalyzer):
+            def analyze_image_bytes(self, image, *, diagnostics=None):
+                return {"detected": True, "landmarks": [], "detections": {}}
+
+        class FakeFall:
+            def reset(self):
+                pass
+
+            def update(self, landmarks, *, diagnostics=None):
+                return {"fall_status": "NORMAL", "fall_detected": False,
+                        "fall_metrics": {"head_shoulders_visible": True,
+                                         "reliable_upper_body_visible": True}}
+
+        with tempfile.TemporaryDirectory(dir="data") as directory:
+            manager = ExperimentManager(Path(directory), test_server.lock)
+            try:
+                with patch.object(test_server, "experiments", manager), \
+                        patch.object(test_server, "PoseAnalyzer", DiagnosticAnalyzer), \
+                        patch.object(test_server, "FallDetector", FakeFall):
+                    test_server.analyze("fall", "old", b"image")
+                    manager.create("a" * 32, "P01", "fall", ["front"], 1, 10)
+                    trial = manager.snapshot()["current"]["trials"][0]
+                    manager.start_trial("a" * 32, trial["trial_id"],
+                                        test_server.sessions["fall"]["fall"].reset, "old")
+                    response = test_server.analyze("fall", "new", b"image")
+                    self.assertFalse(response["detected"])
+                    self.assertEqual(response["fall_status"], "UNKNOWN")
+                    self.assertEqual(manager.snapshot()["current"]["trials"][0]["session_mismatch_frames"], 1)
+            finally:
+                manager.close()
 
     @patch.object(test_server, "PoseAnalyzer", FakeAnalyzer)
     def test_landmarks_are_returned_and_empty_when_pose_is_lost(self):

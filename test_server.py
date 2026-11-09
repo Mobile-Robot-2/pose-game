@@ -4,18 +4,21 @@ import os
 from pathlib import Path
 from threading import RLock
 from contextlib import nullcontext
+from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
+from action_counter import classify_actions
 from experiment_manager import (
     ExperimentConflict, ExperimentManager, FALL_ACTIONS, NONFALL_ACTIONS, csv_text,
 )
 from fall_debug import FallDebugRecorder
 from fall_detector import FallDetector
 from pose_analyzer import PoseAnalyzer
+from rhythm_trials import RhythmTrials
 
 app = FastAPI(title="Pose Test API")
 lock = RLock()
@@ -23,6 +26,7 @@ sessions = {}
 fall_debug: FallDebugRecorder | None = None
 experiments: ExperimentManager | None = None
 BASE_DIR = Path(__file__).resolve().parent
+rhythm_trials = RhythmTrials(BASE_DIR / "data" / "experiments" / "rhythm_trials.csv")
 app.mount("/experiment/assets", StaticFiles(directory=str(BASE_DIR / "static")), name="experiment-assets")
 
 
@@ -95,9 +99,12 @@ def _analyze_locked(mode, session_id, image_bytes, *, diagnostics=None):
             return {"detected": True, "fall_status": state["fall_status"],
                     "fall_detected": state["fall_detected"], "fall_metrics": state["fall_metrics"],
                     "landmarks": landmarks}
-        actions = [name for name, detected in result["detections"].items() if detected]
-        return {"detected": result["detected"], "current_actions": actions,
-                "detected_action": actions[0] if len(actions) == 1 else None, "landmarks": landmarks}
+        actions = [name for name, detected in result.get("raw_detections", result["detections"]).items() if detected]
+        prediction, prediction_status = classify_actions(actions, pose_detected=result["detected"])
+        response = {"detected": result["detected"], "current_actions": actions,
+                    "detected_action": prediction, "prediction_status": prediction_status, "landmarks": landmarks}
+        rhythm_trials.record(session_id, response)
+        return response
 
 
 def _record_fall_state(diagnostics, state):
@@ -134,6 +141,52 @@ async def test_rhythm(image: UploadFile = File(...), session_id: str = Form(...)
     return await analyze_upload("rhythm", image, session_id)
 
 
+class RhythmTrialStart(BaseModel):
+    participant_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
+    actual_action: Literal["LEFT_HAND_UP", "RIGHT_HAND_UP", "ARMS_OPEN", "CLAP"]
+    trial_number: int = Field(ge=1, le=10000)
+
+
+class RhythmTrialEnd(BaseModel):
+    trial_id: str
+
+
+@app.post("/experiment/rhythm/start")
+def start_rhythm_trial(request: RhythmTrialStart):
+    with lock:
+        try:
+            session = sessions.get("rhythm")
+            return rhythm_trials.start(request.participant_id, request.actual_action,
+                                       request.trial_number, session["id"] if session else None)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/experiment/rhythm/current")
+def current_rhythm_trial():
+    with lock:
+        return rhythm_trials.snapshot()
+
+
+@app.post("/experiment/rhythm/end")
+def end_rhythm_trial(request: RhythmTrialEnd):
+    with lock:
+        try:
+            return rhythm_trials.finish(request.trial_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(500, "시행 저장 실패: " + str(exc)) from exc
+
+
+@app.get("/experiment/rhythm/results.csv")
+def rhythm_results():
+    if not rhythm_trials.path.exists():
+        raise HTTPException(404, "저장된 리듬게임 시행이 없습니다.")
+    return FileResponse(rhythm_trials.path, media_type="text/csv; charset=utf-8",
+                        filename="rhythm_trials.csv")
+
+
 @app.on_event("startup")
 def startup():
     global fall_debug, experiments
@@ -151,6 +204,10 @@ def startup():
 @app.on_event("shutdown")
 def shutdown():
     global fall_debug, experiments
+    if rhythm_trials.current is not None:
+        logging.getLogger(__name__).warning("Unfinished rhythm trial discarded during shutdown")
+        rhythm_trials.current = None
+        rhythm_trials.frames = []
     if experiments is not None:
         experiments.close()
         experiments = None

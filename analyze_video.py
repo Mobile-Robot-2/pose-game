@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import cv2
 
+from action_counter import classify_actions
 from fall_detector import FallDetector
 from pose_analyzer import PoseAnalyzer
 
@@ -15,7 +16,7 @@ from pose_analyzer import PoseAnalyzer
 FIELDS = (
     "video", "mode", "frame", "video_time_seconds", "sample_interval_seconds", "pose_detected",
     "fall_status", "fall_detected", "fall_event", "torso_angle", "center_drop",
-    "current_actions", "detected_action",
+    "current_actions", "detected_action", "prediction_status",
 )
 
 
@@ -74,9 +75,10 @@ def analyze_video(video_path: Path, mode: str, output_path: Path, interval: floa
                                torso_angle=metrics["torso_angle"] if reliable else "",
                                center_drop=metrics["center_drop"] if reliable else "")
                 else:
-                    actions = [name for name, detected in analysis["detections"].items() if detected]
+                    actions = [name for name, detected in analysis.get("raw_detections", analysis["detections"]).items() if detected]
+                    prediction, prediction_status = classify_actions(actions, pose_detected=analysis["detected"])
                     row.update(current_actions="|".join(actions),
-                               detected_action=actions[0] if len(actions) == 1 else "")
+                               detected_action=prediction or "", prediction_status=prediction_status)
                 writer.writerow(row)
                 processed += 1
             if processed == 0:
