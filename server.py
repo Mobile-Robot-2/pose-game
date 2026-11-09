@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from action_counter import ActionCounter
 from fall_debug import FallDebugRecorder
 from fall_detector import FallDetector
+from pose_fall_detector import PoseFallDetector
 from medication_store import MedicationLogRequest, MedicationStore
 from pose_analyzer import MODEL_PATH, PoseAnalyzer
 
@@ -55,6 +56,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 counter = ActionCounter()
 fall_detector = FallDetector()
+pose_fall_detector = PoseFallDetector()
 robot_manager = RobotManager()
 medication_store = MedicationStore(MEDICATION_LOG_PATH)
 analyzer: PoseAnalyzer | None = None
@@ -322,10 +324,12 @@ async def _analyze_upload(
             if analysis["detected"]:
                 state = counter.update(analysis["detections"], elapsed_time=elapsed_time)
                 fall_state = fall_detector.update(analysis["landmarks"], diagnostics=diagnostics)
+                pose_fall_state = pose_fall_detector.update(analysis["landmarks"])
                 pose_not_found = False
             else:
                 state = counter.mark_no_pose(elapsed_time=elapsed_time)
                 fall_state = fall_detector.update_no_pose(diagnostics=diagnostics)
+                pose_fall_state = pose_fall_detector.update_no_pose()
                 pose_not_found = True
 
             if diagnostics is not None:
@@ -336,6 +340,11 @@ async def _analyze_upload(
                     landmarks=analysis["landmarks"],
                     fall_status=fall_state["fall_status"],
                     fall_detected=fall_state["fall_detected"],
+                    pose_fall_status=pose_fall_state["fall_status"],
+                    pose_fall_detected=pose_fall_state["fall_detected"],
+                    pose_nspr_active=pose_fall_state["nspr_active"],
+                    pose_nspr_frames=pose_fall_state["nspr_frame_count"],
+                    **{f"pose_{key}": value for key, value in pose_fall_state["features"].items()},
                 )
 
             fall_event = fall_state.get("fall_event", {})
@@ -381,6 +390,7 @@ async def _analyze_upload(
         "game_clear": state["game_clear"],
         "time_over": state["time_over"],
         **fall_state,
+        "pose_fall": pose_fall_state,
         "confidence": fall_state["fall_confidence"],
         "pose_not_found": pose_not_found,
         "image_shape": image_shape,
@@ -404,6 +414,7 @@ def _reset_fall_tracking_locked() -> dict:
     global last_fall_result
 
     fall_state = fall_detector.reset()
+    pose_fall_detector.reset()
     current_fall_session_id = None
     current_fall_location = None
     fall_frame_counter = 0
@@ -456,6 +467,7 @@ def _prepare_fall_session_locked(
 
     if normalized_session_id != current_fall_session_id:
         fall_detector.reset()
+        pose_fall_detector.reset()
         current_fall_session_id = normalized_session_id
         current_fall_location = normalized_location
         seen_fall_session_ids.add(normalized_session_id)

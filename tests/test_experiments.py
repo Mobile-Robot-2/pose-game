@@ -13,12 +13,34 @@ import numpy as np
 
 from experiment_manager import ExperimentManager
 from fall_detector import FallDetector
-from test_fall_detector import STANDING, LYING
 import test_server
 
 
+def complete_pose(*, lying=False):
+    points = [SimpleNamespace(x=0.5, y=0.5, visibility=0.99, presence=0.99) for _ in range(33)]
+    if lying:
+        shoulders = ((0.29, 0.66), (0.41, 0.66))
+        hips = ((0.59, 0.69), (0.71, 0.69))
+        knees = ((0.75, 0.71), (0.87, 0.71))
+        ankles = ((0.91, 0.73), (1.0, 0.73))
+    else:
+        shoulders = ((0.44, 0.30), (0.56, 0.30))
+        hips = ((0.44, 0.55), (0.56, 0.55))
+        knees = ((0.44, 0.75), (0.56, 0.75))
+        ankles = ((0.44, 0.95), (0.56, 0.95))
+    for index, (x, y) in zip((11, 12), shoulders):
+        points[index].x, points[index].y = x, y
+    for index, (x, y) in zip((23, 24), hips):
+        points[index].x, points[index].y = x, y
+    for index, (x, y) in zip((25, 26), knees):
+        points[index].x, points[index].y = x, y
+    for index, (x, y) in zip((27, 28), ankles):
+        points[index].x, points[index].y = x, y
+    return points
+
+
 class FakeAnalyzer:
-    landmarks = STANDING
+    landmarks = complete_pose()
 
     def analyze_image_bytes(self, image, *, diagnostics=None):
         if diagnostics is not None:
@@ -55,7 +77,7 @@ class ExperimentTests(unittest.TestCase):
         timer = patch("fall_detector.time.monotonic", side_effect=lambda: self.now)
         timer.start()
         self.addCleanup(timer.stop)
-        FakeAnalyzer.landmarks = STANDING
+        FakeAnalyzer.landmarks = complete_pose()
         self.client = TestClient(test_server.app)
         self.addCleanup(self.client.close)
         ok, encoded = cv2.imencode(".jpg", np.zeros((64, 64, 3), dtype=np.uint8))
@@ -122,25 +144,26 @@ class ExperimentTests(unittest.TestCase):
         test_server.sessions["fall"]["fall"].status = "FALL_CONFIRMED"
         self.post("start", command)
         self.assertEqual(test_server.sessions["fall"]["fall"].status, "NORMAL")
-        for now, landmarks in ((0, STANDING), (0.4, LYING), (0.8, LYING), (1.3, LYING), (1.7, LYING)):
+        sequence = [(0.0, False)] + [(0.4 * index, True) for index in range(1, 13)]
+        for now, is_lying in sequence:
             self.now = now
-            FakeAnalyzer.landmarks = landmarks
+            FakeAnalyzer.landmarks = complete_pose(lying=is_lying)
             result = self.frame()
         self.assertTrue(result["fall_detected"])
         self.assertEqual(self.manager._trial(self.manager._run())["status"], "running")
         FakeAnalyzer.landmarks = None
-        self.now = 2
+        self.now = 5.2
         self.assertEqual(self.frame()["fall_status"], "UNKNOWN")
         state = self.post("end", command)
         trial = state["current"]["trials"][0]
-        self.assertEqual(trial["frame_count"], 6)
-        self.assertEqual(trial["valid_pose_frames"], 5)
+        self.assertEqual(trial["frame_count"], 14)
+        self.assertEqual(trial["valid_pose_frames"], 13)
         self.assertEqual(trial["unknown_frames"], 1)
         self.assertEqual(trial["debug_errors"], 0)
         directory = self.manager.root / trial["debug_directory"]
         with (directory / "frames.csv").open(encoding="utf-8", newline="") as file:
             rows = list(csv.DictReader(file))
-        self.assertEqual(len(rows), 6)
+        self.assertEqual(len(rows), 14)
         self.assertTrue(all(row["trial_id"] == command["trial_id"] for row in rows))
         self.assertEqual(rows[-1]["response_fall_status"], "UNKNOWN")
         self.assertTrue(all((directory / row["comparison_image"]).is_file() for row in rows))

@@ -41,6 +41,14 @@ FIELDS = (
     "low_pose_ms", "fall_status", "response_fall_status", "fall_detected", "landmark_visibility",
     "landmark_presence", "landmark_xy", "observation_reset_reason", "processing_error",
     "comparison_image",
+    "pose_fall_status", "pose_fall_detected", "pose_nspr_active", "pose_nspr_frames",
+    "pose_spine_deflection_angle", "pose_thigh_deflection_angle", "pose_left_thigh_angle",
+    "pose_right_thigh_angle", "pose_calf_deflection_angle", "pose_left_calf_angle",
+    "pose_right_calf_angle", "pose_spine_ratio", "pose_trend_symbol",
+    "pose_stability_symbol", "pose_stage1_state", "pose_frame_interval_seconds",
+    "pose_final_result", "pose_gamma", "pose_epsilon", "pose_tau",
+    "pose_thresholds",
+    "legacy_fall_status", "legacy_fall_detected",
 )
 
 
@@ -123,6 +131,8 @@ class FallDebugRecorder:
 
     def _write_row(self, writer, row: dict) -> None:
         landmarks = row.get("landmarks")
+        if isinstance(row.get("pose_thresholds"), dict):
+            row["pose_thresholds"] = json.dumps(row["pose_thresholds"], ensure_ascii=False)
         if landmarks:
             for field in ("visibility", "presence"):
                 row[f"landmark_{field}"] = json.dumps({

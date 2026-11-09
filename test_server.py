@@ -17,6 +17,7 @@ from experiment_manager import (
 )
 from fall_debug import FallDebugRecorder
 from fall_detector import FallDetector
+from pose_fall_detector import PoseFallDetector
 from pose_analyzer import PoseAnalyzer
 from rhythm_trials import RhythmTrials
 
@@ -45,7 +46,9 @@ def analyze(mode, session_id, image_bytes, *, diagnostics=None, experiment_ticke
             if manager and manager.is_recording() and trial_diagnostics is None:
                 # A delayed preparation frame or foreign session cannot change
                 # the active trial's MediaPipe tracker or fall detector.
-                result = dict(detected=False, fall_status="UNKNOWN", fall_metrics={}, landmarks=[])
+                result = dict(detected=False, fall_status="UNKNOWN", fall_detected=False,
+                              fall_metrics={}, landmarks=[],
+                              pose_fall={"fall_status": "UNKNOWN", "fall_detected": False})
                 if primary is not None:
                     primary.update(processing_error="experiment_frame_excluded",
                                    response_fall_status="UNKNOWN")
@@ -81,7 +84,8 @@ def _analyze_locked(mode, session_id, image_bytes, *, diagnostics=None):
             detector = (FallDetector(require_fall_posture=True)
                         if mode == "fall" and fall_confirmation_policy == "posture_experimental"
                         else FallDetector())
-            session = {"id": session_id, "analyzer": PoseAnalyzer(), "fall": detector}
+            session = {"id": session_id, "analyzer": PoseAnalyzer(), "fall": detector,
+                       "pose_fall": PoseFallDetector() if mode == "fall" else None}
             sessions[mode] = session
             if diagnostics is not None:
                 diagnostics["observation_reset_reason"] = "new_session"
@@ -97,16 +101,26 @@ def _analyze_locked(mode, session_id, image_bytes, *, diagnostics=None):
         ]
         if mode == "fall":
             if not result["detected"]:
-                state = session["fall"].update_no_pose(diagnostics=diagnostics)
-                _record_fall_state(diagnostics, state)
-                return {"detected": False, "fall_status": "UNKNOWN", "fall_metrics": {}, "landmarks": landmarks}
-            state = session["fall"].update(result["landmarks"], diagnostics=diagnostics)
-            _record_fall_state(diagnostics, state)
-            if not state["fall_metrics"]["head_shoulders_visible"]:
-                return {"detected": False, "fall_status": "UNKNOWN", "fall_metrics": state["fall_metrics"], "landmarks": landmarks}
-            return {"detected": True, "fall_status": state["fall_status"],
-                    "fall_detected": state["fall_detected"], "fall_metrics": state["fall_metrics"],
-                    "landmarks": landmarks}
+                legacy_state = session["fall"].update_no_pose(diagnostics=diagnostics)
+                pose_state = session["pose_fall"].update_no_pose()
+                _record_fall_state(diagnostics, legacy_state, pose_state)
+                return {"detected": False, "fall_status": "UNKNOWN", "fall_detected": False,
+                        "fall_metrics": {}, "legacy_fall_status": "UNKNOWN",
+                        "legacy_fall_detected": False, "pose_fall": pose_state,
+                        "landmarks": landmarks}
+            legacy_state = session["fall"].update(result["landmarks"], diagnostics=diagnostics)
+            pose_state = session["pose_fall"].update(result["landmarks"])
+            _record_fall_state(diagnostics, legacy_state, pose_state)
+            feature_state = pose_state["features"]["stage1_state"]
+            pose_valid = feature_state != "UNKNOWN"
+            return {"detected": pose_valid,
+                    "fall_status": pose_state["fall_status"] if pose_valid else "UNKNOWN",
+                    "fall_detected": pose_state["fall_detected"] if pose_valid else False,
+                    "fall_metrics": legacy_state["fall_metrics"],
+                    "legacy_fall_status": legacy_state["fall_status"],
+                    "legacy_fall_detected": legacy_state["fall_detected"],
+                    "legacy_fall_metrics": legacy_state["fall_metrics"],
+                    "pose_fall": pose_state, "landmarks": landmarks}
         actions = [name for name, detected in result.get("raw_detections", result["detections"]).items() if detected]
         prediction, prediction_status = classify_actions(actions, pose_detected=result["detected"])
         response = {"detected": result["detected"], "current_actions": actions,
@@ -115,12 +129,37 @@ def _analyze_locked(mode, session_id, image_bytes, *, diagnostics=None):
         return response
 
 
-def _record_fall_state(diagnostics, state):
+def _record_fall_state(diagnostics, legacy_state, pose_state):
     if diagnostics is not None:
-        metrics = state["fall_metrics"]
+        metrics = legacy_state["fall_metrics"]
         if metrics["reliable_upper_body_visible"]:
             diagnostics.update(metrics)
-        diagnostics.update(fall_status=state["fall_status"], fall_detected=state["fall_detected"])
+        diagnostics.update(
+            fall_status=pose_state["fall_status"],
+            fall_detected=pose_state["fall_detected"],
+            legacy_fall_status=legacy_state["fall_status"],
+            legacy_fall_detected=legacy_state["fall_detected"],
+            pose_fall_status=pose_state["fall_status"],
+            pose_fall_detected=pose_state["fall_detected"],
+            pose_nspr_active=pose_state["nspr_active"],
+            pose_nspr_frames=pose_state["nspr_frame_count"],
+            **{
+                f"pose_{key}": value
+                for key, value in pose_state["features"].items()
+                if key not in {"fall_status", "nspr_active", "nspr_frame_count"}
+            },
+        )
+
+
+def _reset_session_detectors(session):
+    if session is None:
+        return lambda: None
+
+    def reset():
+        session["fall"].reset()
+        session["pose_fall"].reset()
+
+    return reset
 
 
 async def analyze_upload(mode, image, session_id):
@@ -146,7 +185,10 @@ async def test_fall(image: UploadFile = File(...), session_id: str = Form(...)):
 
 @app.get("/test/config")
 def test_config():
-    return {"fall_confirmation_policy": fall_confirmation_policy}
+    return {
+        "fall_detection_algorithm": "pose_features_rule",
+        "fall_confirmation_policy": fall_confirmation_policy,
+    }
 
 
 @app.post("/test/rhythm")
@@ -303,7 +345,7 @@ def experiment_start(command: TrialCommand):
         manager = experiment_manager()
         manager.start_trial(
             command.experiment_id, command.trial_id,
-            session["fall"].reset if session else lambda: None,
+            _reset_session_detectors(session),
             session["id"] if session else None,
             fall_confirmation_policy,
         )
