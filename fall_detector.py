@@ -39,6 +39,11 @@ BODY_CENTER_LOW_Y = 0.50
 MIN_UPPER_BODY_VISIBILITY = 0.50
 MIN_RELIABLE_UPPER_BODY_VISIBILITY = 0.55
 
+# [진단] 전방/후방 낙상 방향 판별 가능성 검증용 로깅.
+# FSM 판정에는 전혀 관여하지 않고, FALL_CONFIRMED 순간에 후보 신호만 한 줄 출력한다.
+# 낙하 직전~확정까지를 담도록 관찰 윈도우보다 넉넉히 잡는다.
+DIRECTION_HISTORY_SECONDS = 2.0
+
 
 class FallDetector:
     """Stateful fall-suspicion detector using normalized pose landmarks."""
@@ -59,6 +64,7 @@ class FallDetector:
         self.last_observation_time = None
         self.missing_pose_pending = False
         self.last_metrics = self._empty_metrics()
+        self._signal_history = deque()  # [진단] 방향 판별용 최근 프레임 신호
         return self.get_state()
 
     def update(self, landmarks, *, diagnostics: dict | None = None, timestamp: float | None = None) -> dict:
@@ -86,6 +92,7 @@ class FallDetector:
 
         self.last_observation_time = now
         self.last_metrics = metrics
+        self._record_direction_sample(landmarks, metrics, now)  # [진단]
         self._new_event = False
 
         in_frame = all(
@@ -171,6 +178,7 @@ class FallDetector:
                     self.status = "FALL_CONFIRMED"
                     self.recovery_since = None
                     self._create_event()
+                    self._log_fall_direction(now)  # [진단]
             else:
                 self.low_pose_since = None
                 if upright_pose or now - self.last_evidence_time > EVIDENCE_GRACE_SECONDS:
@@ -234,6 +242,7 @@ class FallDetector:
     def _break_observation(self) -> None:
         self.upright_center_history.clear()
         self.upright_head_shoulder_history.clear()
+        self._signal_history.clear()  # [진단] 관찰이 끊기면 방향 기준선도 초기화
         self.last_observation_time = None
         self.missing_pose_pending = False
         self.low_pose_since = None
@@ -258,6 +267,64 @@ class FallDetector:
             nose_y - previous_nose >= MIN_HEAD_DROP
             and shoulder_y - previous_shoulder >= MIN_SHOULDER_DROP
             for _, previous_nose, previous_shoulder in history
+        )
+
+    def _record_direction_sample(self, landmarks, metrics: dict, now: float) -> None:
+        """[진단] 방향 판별 후보 신호(세로 낙폭 + 깊이 z)를 최근 윈도우에 쌓는다.
+
+        FSM 판정과 완전히 분리된 기록 전용 로직이다. reliable_upper_body_visible
+        프레임에서만 호출되므로 상체(코·어깨·골반) 좌표는 신뢰할 수 있다.
+        MediaPipe 의 z 는 골반 중심을 원점으로 한 상대 깊이(작을수록 카메라에 가까움).
+        """
+        left_shoulder = landmarks[LEFT_SHOULDER]
+        right_shoulder = landmarks[RIGHT_SHOULDER]
+        left_hip = landmarks[LEFT_HIP]
+        right_hip = landmarks[RIGHT_HIP]
+        nose = landmarks[NOSE]
+        self._signal_history.append({
+            "t": now,
+            "nose_y": metrics["head_y"],
+            "shoulder_y": metrics["shoulder_y"],
+            "hip_y": metrics["hip_y"],
+            "nose_z": float(getattr(nose, "z", 0.0)),
+            "shoulder_z": float((getattr(left_shoulder, "z", 0.0)
+                                 + getattr(right_shoulder, "z", 0.0)) / 2),
+            "hip_z": float((getattr(left_hip, "z", 0.0)
+                            + getattr(right_hip, "z", 0.0)) / 2),
+        })
+        while (
+            self._signal_history
+            and now - self._signal_history[0]["t"] > DIRECTION_HISTORY_SECONDS
+        ):
+            self._signal_history.popleft()
+
+    def _log_fall_direction(self, now: float) -> None:
+        """[진단] FALL_CONFIRMED 순간, 전방/후방 판별 후보 신호를 한 줄로 출력한다.
+
+        label 은 ? 로 두니, 전방낙상 'F' / 후방낙상 'B' 로 바꿔 적어 붙여넣으면 된다.
+        부호 규약: 세로 낙폭(head_drop/hip_drop)은 아래로 떨어질수록 +,
+        dz_*(깊이 변화)는 카메라로 다가올수록 - / 멀어질수록 +.
+        """
+        history = self._signal_history
+        if len(history) < 2:
+            print(f"fall_dir_debug label=? n={len(history)} (표본부족: 기준선 없음)")
+            return
+        base, current = history[0], history[-1]
+        span = current["t"] - base["t"]
+        head_drop = current["nose_y"] - base["nose_y"]
+        hip_drop = current["hip_y"] - base["hip_y"]
+        denom = hip_drop if abs(hip_drop) > 1e-3 else (1e-3 if hip_drop >= 0 else -1e-3)
+        head_hip_ratio = head_drop / denom
+        dz_nose = current["nose_z"] - base["nose_z"]
+        dz_shoulder = current["shoulder_z"] - base["shoulder_z"]
+        print(
+            "fall_dir_debug label=? "
+            f"n={len(history)} span={span:.2f}s "
+            f"head_drop={head_drop:+.3f} hip_drop={hip_drop:+.3f} "
+            f"head_hip_ratio={head_hip_ratio:+.2f} "
+            f"dz_nose={dz_nose:+.3f} dz_shoulder={dz_shoulder:+.3f} "
+            f"nose_z0={base['nose_z']:+.3f} nose_z1={current['nose_z']:+.3f} "
+            f"sh_z0={base['shoulder_z']:+.3f} sh_z1={current['shoulder_z']:+.3f}"
         )
 
     def get_state(self) -> dict:
