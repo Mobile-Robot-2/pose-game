@@ -53,6 +53,16 @@ class AnalyzeVideoTest(unittest.TestCase):
         self.assertEqual(FakeAnalyzer.timestamps, [0, 200, 400, 600, 800, 1000, 1200])
         self.assertEqual(rows[1]["fall_status"], "FALL_SUSPECTED")
         self.assertEqual(rows[-1]["fall_status"], "FALL_CONFIRMED")
+        self.assertEqual(rows[0]["fall_confirmation_policy"], "baseline")
+
+    @patch("analyze_video.PoseAnalyzer", FakeAnalyzer)
+    def test_experimental_fall_policy_is_recorded(self):
+        output = Path(self.directory.name) / "experimental.csv"
+        analyze_video(self.video, "fall", output, require_fall_posture=True)
+        with output.open(encoding="utf-8-sig", newline="") as file:
+            rows = list(csv.DictReader(file))
+        self.assertEqual(rows[0]["fall_confirmation_policy"], "posture_experimental")
+        self.assertEqual(rows[-1]["fall_status"], "FALL_CONFIRMED")
 
     @patch("analyze_video.PoseAnalyzer", MissingFrameAnalyzer)
     def test_missing_frame_grace_uses_video_time(self):

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 import tempfile
+import os
 
 # The test exercises session logic without requiring a camera or MediaPipe runtime.
 fake_pose = types.ModuleType("pose_analyzer")
@@ -105,13 +106,46 @@ class TestSessions(unittest.TestCase):
                     manager.create("a" * 32, "P01", "fall", ["front"], 1, 10)
                     trial = manager.snapshot()["current"]["trials"][0]
                     manager.start_trial("a" * 32, trial["trial_id"],
-                                        test_server.sessions["fall"]["fall"].reset, "old")
+                                        test_server.sessions["fall"]["fall"].reset, "old",
+                                        "posture_experimental")
+                    self.assertEqual(manager.snapshot()["current"]["trials"][0]["fall_confirmation_policy"],
+                                     "posture_experimental")
                     response = test_server.analyze("fall", "new", b"image")
                     self.assertFalse(response["detected"])
                     self.assertEqual(response["fall_status"], "UNKNOWN")
                     self.assertEqual(manager.snapshot()["current"]["trials"][0]["session_mismatch_frames"], 1)
             finally:
                 manager.close()
+
+    def test_experimental_fall_policy_is_visible_and_applied_to_session(self):
+        class FakeFall:
+            def __init__(self, *, require_fall_posture=False):
+                self.require_fall_posture = require_fall_posture
+
+            def update(self, landmarks, *, diagnostics=None):
+                return {"fall_status": "NORMAL", "fall_detected": False,
+                        "fall_metrics": {"head_shoulders_visible": True,
+                                         "reliable_upper_body_visible": True}}
+
+        with patch.object(test_server, "fall_confirmation_policy", "posture_experimental"), \
+                patch.object(test_server, "PoseAnalyzer", FakeAnalyzer), \
+                patch.object(test_server, "FallDetector", FakeFall):
+            response = test_server.analyze("fall", "temi", b"image")
+            self.assertEqual(response["confirmation_policy"], "posture_experimental")
+            self.assertTrue(test_server.sessions["fall"]["fall"].require_fall_posture)
+            self.assertEqual(test_server.test_config()["fall_confirmation_policy"], "posture_experimental")
+
+    def test_unknown_fall_policy_fails_before_starting_experiment_manager(self):
+        with patch.dict(os.environ, {"FALL_CONFIRMATION_POLICY": "typo"}), \
+                patch.object(test_server, "fall_confirmation_policy", "baseline"):
+            with self.assertRaises(ValueError):
+                test_server.startup()
+
+    def test_dashboard_start_passes_selected_confirmation_policy(self):
+        with patch.object(test_server, "fall_confirmation_policy", "posture_experimental"), \
+                patch.object(test_server, "experiments") as manager:
+            test_server.experiment_start(test_server.TrialCommand(experiment_id="run", trial_id="trial"))
+            self.assertEqual(manager.start_trial.call_args.args[-1], "posture_experimental")
 
     @patch.object(test_server, "PoseAnalyzer", FakeAnalyzer)
     def test_landmarks_are_returned_and_empty_when_pose_is_lost(self):

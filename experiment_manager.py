@@ -21,7 +21,7 @@ SUMMARY_FIELDS = (
     "set_number", "action", "action_label", "status", "started_at", "ended_at",
     "end_reason", "observation_seconds", "elapsed_seconds", "fall_detected",
     "first_confirmed_at", "first_confirmation_seconds", "frame_count", "valid_pose_frames",
-    "unknown_frames", "session_id", "session_mismatch_frames", "connection_gaps",
+    "unknown_frames", "session_id", "fall_confirmation_policy", "session_mismatch_frames", "connection_gaps",
     "processing_errors",
     "max_frame_gap_seconds", "actual_action", "actual_fall", "valid", "notes",
     "debug_directory", "debug_dropped", "debug_errors",
@@ -154,6 +154,7 @@ class ExperimentManager:
                         observation_seconds=observation_seconds, elapsed_seconds=0,
                         fall_detected=False, first_confirmed_at=None, first_confirmation_seconds=None,
                         frame_count=0, valid_pose_frames=0, unknown_frames=0, session_id=None,
+                        fall_confirmation_policy=None,
                         processing_errors=0,
                         session_mismatch_frames=0, connection_gaps=0, max_frame_gap_seconds=0,
                         actual_action="", actual_fall=None, valid=None, notes="",
@@ -166,7 +167,7 @@ class ExperimentManager:
             self._save(run, export=True)
             return run_id
 
-    def start_trial(self, run_id, trial_id, reset_detector, session_id):
+    def start_trial(self, run_id, trial_id, reset_detector, session_id, confirmation_policy="baseline"):
         with self.lock:
             self.tick()
             run, trial = self._require_current(run_id, trial_id)
@@ -181,6 +182,7 @@ class ExperimentManager:
             self.started_clock = self.clock()
             self.last_trial_frame = None
             trial.update(status="running", started_at=utc_now(), session_id=session_id,
+                         fall_confirmation_policy=confirmation_policy,
                          debug_directory=str(recorder.directory.relative_to(self.root)))
             self._save(run, export=True)
 

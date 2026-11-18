@@ -24,6 +24,7 @@ app = FastAPI(title="Pose Test API")
 lock = RLock()
 sessions = {}
 fall_debug: FallDebugRecorder | None = None
+fall_confirmation_policy = "baseline"
 experiments: ExperimentManager | None = None
 BASE_DIR = Path(__file__).resolve().parent
 rhythm_trials = RhythmTrials(BASE_DIR / "data" / "experiments" / "rhythm_trials.csv")
@@ -39,6 +40,8 @@ def analyze(mode, session_id, image_bytes, *, diagnostics=None, experiment_ticke
         context = manager.capture_frame(ticket, image_bytes) if manager else nullcontext()
         with context as trial_diagnostics:
             primary = diagnostics if diagnostics is not None else trial_diagnostics
+            if primary is not None and mode == "fall":
+                primary["fall_confirmation_policy"] = fall_confirmation_policy
             if manager and manager.is_recording() and trial_diagnostics is None:
                 # A delayed preparation frame or foreign session cannot change
                 # the active trial's MediaPipe tracker or fall detector.
@@ -48,6 +51,8 @@ def analyze(mode, session_id, image_bytes, *, diagnostics=None, experiment_ticke
                                    response_fall_status="UNKNOWN")
             else:
                 result = _analyze_locked(mode, session_id, image_bytes, diagnostics=primary)
+            if mode == "fall":
+                result["confirmation_policy"] = fall_confirmation_policy
             if manager:
                 if trial_diagnostics is not None and trial_diagnostics is not primary:
                     trial_diagnostics.update({
@@ -73,7 +78,10 @@ def _analyze_locked(mode, session_id, image_bytes, *, diagnostics=None):
             if session is not None:
                 sessions.pop(mode)
                 session["analyzer"].close()
-            session = {"id": session_id, "analyzer": PoseAnalyzer(), "fall": FallDetector()}
+            detector = (FallDetector(require_fall_posture=True)
+                        if mode == "fall" and fall_confirmation_policy == "posture_experimental"
+                        else FallDetector())
+            session = {"id": session_id, "analyzer": PoseAnalyzer(), "fall": detector}
             sessions[mode] = session
             if diagnostics is not None:
                 diagnostics["observation_reset_reason"] = "new_session"
@@ -136,6 +144,11 @@ async def test_fall(image: UploadFile = File(...), session_id: str = Form(...)):
     return await analyze_upload("fall", image, session_id)
 
 
+@app.get("/test/config")
+def test_config():
+    return {"fall_confirmation_policy": fall_confirmation_policy}
+
+
 @app.post("/test/rhythm")
 async def test_rhythm(image: UploadFile = File(...), session_id: str = Form(...)):
     return await analyze_upload("rhythm", image, session_id)
@@ -189,7 +202,13 @@ def rhythm_results():
 
 @app.on_event("startup")
 def startup():
-    global fall_debug, experiments
+    global fall_debug, experiments, fall_confirmation_policy
+    fall_confirmation_policy = os.environ.get("FALL_CONFIRMATION_POLICY", "baseline").strip().lower()
+    if fall_confirmation_policy not in {"baseline", "posture_experimental"}:
+        raise ValueError("FALL_CONFIRMATION_POLICY must be baseline or posture_experimental")
+    if fall_confirmation_policy == "posture_experimental":
+        logging.getLogger(__name__).warning(
+            "Experimental fall policy can miss falls; use only for comparison, not caregiver calls")
     mode = os.environ.get("FALL_DEBUG", "").strip().lower()
     experiments = ExperimentManager(BASE_DIR / "data" / "experiments", lock, save_frames=mode == "frames")
     experiments.start_monitor()
@@ -286,6 +305,7 @@ def experiment_start(command: TrialCommand):
             command.experiment_id, command.trial_id,
             session["fall"].reset if session else lambda: None,
             session["id"] if session else None,
+            fall_confirmation_policy,
         )
         return manager.snapshot()
 

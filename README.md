@@ -63,6 +63,32 @@ python -m uvicorn test_server:app --host 0.0.0.0 --port 8000
 
 테스트 서버는 Firebase에 결과를 저장하거나 보호자에게 연락하지 않습니다. 한 번에 한 기기로 테스트하는 용도이며, 화면을 나갔다 다시 열면 새 세션이 시작됩니다. 기존 서버가 8000번 포트를 사용하고 있다면 먼저 종료하세요.
 
+### 비낙상 오인식 비교용 실험 규칙
+
+**주의: 이 규칙은 일부 모의 낙상을 놓친 것이 확인된 실험용입니다. 보호자 연결 테스트나 실제 안전 감시에 사용하지 마세요.** 기본 서버 설정은 기존 낙상 규칙(`baseline`)을 유지합니다.
+
+비교 실험을 하려면 VS Code의 **Command Prompt**에서 테스트 서버를 종료하고 다음처럼 실행합니다.
+
+```cmd
+.venv\Scripts\activate.bat
+set FALL_CONFIRMATION_POLICY=posture_experimental
+set FALL_DEBUG=csv
+python -m uvicorn test_server:app --host 0.0.0.0 --port 8000
+```
+
+`http://127.0.0.1:8000/test/config`에서 `fall_confirmation_policy`가 `posture_experimental`인지 확인하고 **낙상 감지 테스트**만 사용하세요. 낮은 수직 자세는 정상으로 단정하지 않고 의심 상태에 남을 수 있습니다. 실험 정책은 테스트 서버의 새 세션에서 적용됩니다. 기존 서비스 서버에는 적용되지 않습니다. 대시보드 시행 요약과 진단 CSV에는 사용한 정책이 기록됩니다.
+
+기존 규칙으로 비교하려면 테스트 서버를 종료하고 같은 터미널에서 `set FALL_CONFIRMATION_POLICY=baseline`을 실행한 후 서버를 다시 시작하세요. 환경변수는 해당 터미널에 남습니다. 결과에 기록된 정책을 반드시 확인하고 다른 정책의 시행을 무심코 합산하지 마세요.
+
+저장 영상은 같은 영상을 각 정책으로 별도 분석할 수 있습니다.
+
+```cmd
+python analyze_video.py fall "data\videos\fall.mp4"
+python analyze_video.py fall "data\videos\fall.mp4" --require-fall-posture
+```
+
+CSV의 `fall_confirmation_policy`로 결과를 구분합니다. 기존 기록 재생에서 확인된 한계와 비교 결과는 [실험 기록](docs/fall-nonfall-comparison.md)을 참고하세요.
+
 ## 4. Temi 앱 연결
 
 1. 노트북과 Temi가 서로 통신할 수 있는 네트워크에 연결되어 있는지 확인합니다.

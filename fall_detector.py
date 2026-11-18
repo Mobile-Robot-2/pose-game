@@ -43,7 +43,8 @@ MIN_RELIABLE_UPPER_BODY_VISIBILITY = 0.55
 class FallDetector:
     """Stateful fall-suspicion detector using normalized pose landmarks."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, require_fall_posture: bool = False) -> None:
+        self.require_fall_posture = require_fall_posture
         self.reset()
 
     def reset(self) -> dict:
@@ -58,6 +59,7 @@ class FallDetector:
         self.upright_head_shoulder_history = deque()
         self.last_observation_time = None
         self.missing_pose_pending = False
+        self.fall_posture_seen = False
         self.last_metrics = self._empty_metrics()
         return self.get_state()
 
@@ -135,6 +137,14 @@ class FallDetector:
             and (metrics["horizontal"] or metrics["upper_body_horizontal"])
         )
         fall_motion = angle_fall_motion or head_shoulder_drop
+        posture_evidence = low_fall_pose and (
+            metrics["horizontal"]
+            or metrics["upper_body_angle"] >= UPPER_BODY_LOW_HOLD_ANGLE_DEGREES
+            or (in_frame and landmarks[NOSE].y >= (
+                landmarks[LEFT_SHOULDER].y + landmarks[RIGHT_SHOULDER].y) / 2)
+        )
+        if self.status == "FALL_SUSPECTED" and posture_evidence:
+            self.fall_posture_seen = True
         if diagnostics is not None:
             diagnostics.update(
                 upright_pose=upright_pose,
@@ -146,10 +156,13 @@ class FallDetector:
                 fall_motion=fall_motion,
                 angle_fall_motion=angle_fall_motion,
                 head_shoulder_drop=head_shoulder_drop,
+                fall_posture_evidence=posture_evidence,
+                fall_posture_seen=self.fall_posture_seen or (fall_motion and posture_evidence),
             )
 
         if self.status in ("NORMAL", "RECOVERED"):
             if fall_motion:
+                self.fall_posture_seen = posture_evidence
                 self.status = "FALL_SUSPECTED"
                 self.last_evidence_time = now
                 self.low_pose_since = now if low_fall_pose else None
@@ -167,7 +180,8 @@ class FallDetector:
             if low_fall_pose:
                 if self.low_pose_since is None:
                     self.low_pose_since = now
-                elif now - self.low_pose_since >= FALL_CONFIRM_SECONDS:
+                elif (now - self.low_pose_since >= FALL_CONFIRM_SECONDS
+                      and (not self.require_fall_posture or self.fall_posture_seen)):
                     self.status = "FALL_CONFIRMED"
                     self.recovery_since = None
                     self._create_event()
@@ -236,6 +250,7 @@ class FallDetector:
         self.upright_head_shoulder_history.clear()
         self.last_observation_time = None
         self.missing_pose_pending = False
+        self.fall_posture_seen = False
         self.low_pose_since = None
         self.recovery_since = None
         if self.status == "FALL_SUSPECTED":

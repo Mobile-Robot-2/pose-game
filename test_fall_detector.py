@@ -64,6 +64,51 @@ class FallDetectorTest(unittest.TestCase):
         self.assertIsNotNone(state["fall_event"]["event_id"])
         return state["fall_event"]["event_id"]
 
+    def test_experimental_policy_keeps_rapid_vertical_sit_as_suspected(self):
+        self.detector = FallDetector(require_fall_posture=True)
+        low_upright = pose((.50, .49), (.50, .57), (.50, .73))
+        self.observe(0.0, STANDING, "NORMAL")
+        self.observe(.3, low_upright, "FALL_SUSPECTED")
+        for t in (.5, .7, .9, 1.1, 1.3, 1.5):
+            state = self.observe(t, low_upright, "FALL_SUSPECTED")
+            self.assertFalse(state["fall_detected"])
+        self.observe(1.7, STANDING, "NORMAL")
+
+    def test_experimental_policy_still_confirms_lateral_fall(self):
+        self.detector = FallDetector(require_fall_posture=True)
+        self.confirm_fall()
+
+    def test_experimental_policy_does_not_confirm_held_bending_with_high_shoulders(self):
+        self.detector = FallDetector(require_fall_posture=True)
+        self.observe(0.0, STANDING, "NORMAL")
+        self.observe(.5, BENDING, "FALL_SUSPECTED")
+        for t in (1.0, 1.5, 2.0, 2.5):
+            state = self.detector.update(BENDING, timestamp=t)
+            self.assertFalse(state["fall_detected"])
+
+    def test_experimental_policy_does_not_confirm_slow_lying(self):
+        self.detector = FallDetector(require_fall_posture=True)
+        self.test_slow_lying_down()
+
+    def test_experimental_policy_accepts_head_below_shoulders(self):
+        self.detector = FallDetector(require_fall_posture=True)
+        low_pose = pose((.50, .70), (.50, .62), (.50, .75))
+        self.observe(0.0, STANDING, "NORMAL")
+        self.observe(.4, low_pose, "FALL_SUSPECTED")
+        self.observe(.8, low_pose, "FALL_SUSPECTED")
+        self.observe(1.2, low_pose, "FALL_SUSPECTED")
+        self.observe(1.55, low_pose, "FALL_SUSPECTED")
+        self.observe(1.65, low_pose, "FALL_CONFIRMED")
+
+    def test_experimental_policy_does_not_reuse_old_posture_evidence(self):
+        self.detector = FallDetector(require_fall_posture=True)
+        self.begin_fall()
+        self.observe(.7, STANDING, "NORMAL")
+        low_upright = pose((.50, .49), (.50, .57), (.50, .73))
+        self.observe(1.0, low_upright, "FALL_SUSPECTED")
+        for t in (1.2, 1.4, 1.6, 1.8, 2.0, 2.2):
+            self.observe(t, low_upright, "FALL_SUSPECTED")
+
     def test_already_lying(self):
         for timestamp in (0.0, 0.5, 1.0, 1.5):
             state = self.observe(timestamp, LYING, "NORMAL")
